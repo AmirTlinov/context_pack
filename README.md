@@ -6,9 +6,9 @@
 </p>
 
 <p align="center">
-  <a href="#en">🇬🇧 English</a>
+  <a href="#en">EN</a>
   &nbsp;•&nbsp;
-  <a href="#ru">🇷🇺 Русский</a>
+  <a href="#ru">RU</a>
 </p>
 
 ---
@@ -16,7 +16,7 @@
 <a id="en"></a>
 
 <details open>
-<summary><b>🇬🇧 English</b></summary>
+<summary><b>EN</b></summary>
 
 ## What this MCP solves
 
@@ -136,7 +136,7 @@ CONTEXT_PACK_INITIALIZE_TIMEOUT_MS = "20000"
 <a id="ru"></a>
 
 <details>
-<summary><b>🇷🇺 Русский</b></summary>
+<summary><b>RU</b></summary>
 
 ## Что решает этот MCP
 
