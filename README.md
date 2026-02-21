@@ -1,86 +1,137 @@
-# context-pack — MCP Context Pack Server
+# context-pack (MCP)
 
-A standalone MCP server that lets AI agents build rich, curated **context packs** — structured bundles of code references, descriptions, and Mermaid diagrams — so that other agents or humans can consume them as a complete, self-contained context.
+> **EN:** Turn agent research into **high-signal context packs** (real code excerpts + comments + diagrams), not vague opinions.  
+> **RU:** Превращает исследование агентов в **плотные контекст-пакеты** (реальные вырезки кода + комментарии + диаграммы), а не расплывчатые мнения.
 
-## Concept
+---
 
-Instead of writing large diffs or copying code around, an agent uses `input` to plant **anchors** (refs) pointing to exact lines in source files. When `output` is called, those anchors are expanded into real code excerpts, producing a full context document ready for immediate use.
+## 1) Why this MCP is useful / Чем этот MCP полезен
 
-## Tools
+### EN
+Without `context-pack`, explorer-like agents often return summaries with references, and the orchestrator must re-open files to verify reality.  
+With `context-pack`, agents place anchors (`path + line range`) and the server renders those anchors into real Markdown code excerpts.
 
-Pack ID format: `pk_[a-z2-7]{8}` (example: `pk_f2ireb33`).
+**Result:**
+- fewer output tokens in agent-to-orchestrator handoff (cheaper runs);
+- higher factual quality and completeness of context;
+- less duplicate investigation by the orchestrator.
 
-### `input` — Build a context pack
+### RU
+Без `context-pack` исследовательские агенты обычно передают пересказ + ссылки, и оркестратор вынужден заново лезть в код и проверять факты.  
+С `context-pack` агент ставит якоря (`path + диапазон строк`), а сервер превращает их в реальные вырезки кода в Markdown.
 
-Call without arguments to list existing packs:
-```json
-{ "name": "input" }
+**Итог:**
+- меньше output-токенов при передаче результатов (дешевле);
+- выше качество и полнота фактического контекста;
+- оркестратору не нужно повторно делать ту же разведку.
+
+---
+
+## 2) Quick flow / Быстрый сценарий
+
+1. Agent uses `input` to create/update a pack and add anchors.
+2. Agent uses `output get` to render full Markdown with real excerpts.
+3. Agent returns only `pack_id + short summary` to orchestrator.
+4. Orchestrator reads one “meaty” pack instead of re-reading many files.
+
+---
+
+## 3) Build and run / Сборка и запуск
+
+```bash
+cargo build --release
+./target/release/mcp-context-pack
 ```
 
-All mutations use an `action` field:
+Recommended env:
 
-| action | description |
-|---|---|
-| `create` | Create a new draft pack |
-| `get` | Fetch pack metadata |
-| `list` | List packs (with optional `status`, `query`, `limit`, `offset`) |
-| `upsert_section` | Add or update a section |
-| `delete_section` | Remove a section |
-| `upsert_ref` | Add or update a code reference anchor |
-| `delete_ref` | Remove a reference |
-| `upsert_diagram` | Add or update a Mermaid diagram |
-| `set_meta` | Update title, brief, tags |
-| `set_status` | Transition `draft` to `finalized` or back |
-| `touch_ttl` | Set or extend pack TTL (`ttl_minutes` or `extend_minutes`) |
-
-Canonical `input` fields (no aliases):
-- `upsert_section`: use `section_title` / `section_description` (do not use `title` / `description`)
-- `upsert_ref`: use `ref_title`, `ref_why` (do not use `title`/`why`)
-- `upsert_diagram`: use `diagram_why` for rationale (do not use `why`)
-
-### Mutation concurrency contract
-
-All mutating actions except `create` require `expected_revision`.
-If the stored revision differs, the tool returns `kind=conflict`, `code=revision_conflict`.
-
-### TTL contract
-
-- `create` requires `ttl_minutes`
-- `touch_ttl` requires exactly one field:
-  - `ttl_minutes` (set absolute TTL from now), or
-  - `extend_minutes` (extend current TTL)
-- expired packs are purged automatically on repository reads/listing.
-
-### `output` — Render a context pack
-
-Call without arguments to list packs:
-```json
-{ "name": "output" }
+```bash
+CONTEXT_PACK_ROOT=/tmp/context-pack \
+CONTEXT_PACK_SOURCE_ROOT="$PWD" \
+CONTEXT_PACK_LOG="mcp_context_pack=info" \
+CONTEXT_PACK_INITIALIZE_TIMEOUT_MS=20000 \
+./target/release/mcp-context-pack
 ```
 
-Call with `id` or `name` to get a fully rendered pack with real code excerpts:
-```json
-{ "name": "output", "arguments": { "name": "my-pack" } }
+> `CONTEXT_PACK_ROOT` is the storage root. Packs are stored in `{CONTEXT_PACK_ROOT}/packs/*.md`.
+
+---
+
+## 4) Configuration for clients / Параметры для клиентов
+
+## 4.1 Codex `config.toml`
+
+```toml
+[mcp_servers.context_pack]
+command = "/absolute/path/to/mcp-context-pack"
+args = []
+
+[mcp_servers.context_pack.env]
+CONTEXT_PACK_ROOT = "/absolute/path/to/context-pack-data"
+CONTEXT_PACK_SOURCE_ROOT = "__SESSION_CWD__"
+CONTEXT_PACK_LOG = "mcp_context_pack=info"
+CONTEXT_PACK_INITIALIZE_TIMEOUT_MS = "20000"
 ```
 
-Optional list filters: `status`, `query`, `limit`, `offset`.
-Optional `status` filter for `get`: `{ "status": "finalized" }` to require a specific state.
-`output` is always Markdown; `format` parameter is unsupported.
-
-## Tool response contract
-
-`input` successful calls return `result.content[0].text` as strict JSON:
+## 4.2 Generic `mcp.json`
 
 ```json
 {
-  "action": "upsert_ref",
-  "payload": { "...": "..." }
+  "mcpServers": {
+    "context_pack": {
+      "command": "/absolute/path/to/mcp-context-pack",
+      "args": [],
+      "env": {
+        "CONTEXT_PACK_ROOT": "/absolute/path/to/context-pack-data",
+        "CONTEXT_PACK_SOURCE_ROOT": "__SESSION_CWD__",
+        "CONTEXT_PACK_LOG": "mcp_context_pack=info",
+        "CONTEXT_PACK_INITIALIZE_TIMEOUT_MS": "20000"
+      }
+    }
+  }
 }
 ```
 
-`output` successful calls return plain Markdown in `result.content[0].text` (no JSON envelope).
+## 4.3 What each parameter means / Что означает каждый параметр
 
-Tool failures return `isError: true` and strict machine-readable JSON in `text`:
+| Parameter | EN | RU |
+|---|---|---|
+| `command` | Path to server binary. | Путь к бинарнику сервера. |
+| `args` | Optional CLI args (usually empty). | Опциональные аргументы CLI (обычно пусто). |
+| `CONTEXT_PACK_ROOT` | Storage root for packs. Actual files: `{root}/packs/*.md`. | Корень хранилища пакетов. Фактические файлы: `{root}/packs/*.md`. |
+| `CONTEXT_PACK_SOURCE_ROOT` | Source tree root used to resolve anchors into code excerpts. `__SESSION_CWD__`, `session_cwd`, `cwd`, `.` mean current session directory. | Корень исходников для превращения якорей в цитаты кода. `__SESSION_CWD__`, `session_cwd`, `cwd`, `.` означают текущую директорию сессии. |
+| `CONTEXT_PACK_LOG` | Log filter (stderr). | Уровень/фильтр логов (stderr). |
+| `CONTEXT_PACK_INITIALIZE_TIMEOUT_MS` | How long server waits for first MCP `initialize` before exit. | Сколько сервер ждёт первый MCP `initialize` перед завершением. |
+
+---
+
+## 5) Tools and contract / Инструменты и контракт
+
+Pack id format: `pk_[a-z2-7]{8}` (example: `pk_f2ireb33`).
+
+### `input`
+- default action (if omitted): `list`
+- actions: `list`, `create`, `get`, `upsert_section`, `delete_section`, `upsert_ref`, `delete_ref`, `upsert_diagram`, `set_meta`, `set_status`, `touch_ttl`
+
+Important rules:
+- all mutating actions except `create` require `expected_revision`;
+- `create` requires `ttl_minutes`;
+- `touch_ttl` requires exactly one: `ttl_minutes` **or** `extend_minutes`;
+- canonical fields only (legacy aliases are rejected):
+  - `section_title`, `section_description`
+  - `ref_title`, `ref_why`
+  - `diagram_why`
+
+### `output`
+- default action: `list` (or `get` if `id/name` is provided)
+- `get` renders Markdown with real code excerpts
+- output format is always Markdown (`format` param is rejected)
+
+### Success/Error shape
+
+- successful `input`: JSON payload in `result.content[0].text`
+- successful `output`: Markdown in `result.content[0].text`
+- tool error: `isError=true` + strict JSON in `text`:
 
 ```json
 {
@@ -89,100 +140,56 @@ Tool failures return `isError: true` and strict machine-readable JSON in `text`:
   "code": "invalid_data|ttl_required|not_found|revision_conflict|...",
   "message": "...",
   "request_id": 123,
-  "details": { "...": "..." }
+  "details": {}
 }
 ```
 
-## MCP transport contract
+---
 
-- Preferred request transport is stdio framing: `Content-Length: N\r\n\r\n{json}`.
-- Standard extra headers like `Content-Type` are accepted before `Content-Length`.
-- For compatibility, server also accepts JSON messages without framing (JSON object/array; trailing newline is optional).
-- Response mode follows the first incoming message transport:
-  - framed request -> framed responses,
-  - unframed JSON request -> newline-delimited JSON responses.
+## 6) Step-by-step install for agents / Пошаговая установка для агентов
 
-## Rendered output format
+### EN
+1. Build server:
+   ```bash
+   cargo build --release
+   ```
+2. Choose stable storage directory and source root policy.
+3. Add `context_pack` server block to your MCP client config (`config.toml` or `mcp.json`).
+4. Restart MCP client/session.
+5. Smoke test:
+   - call `input` with `{ "action": "list" }`
+   - call `output` with `{ "action": "list" }`
+6. For explorer/reviewer agents: enforce handoff style `pack_id + short summary`; keep full evidence in context-pack.
 
-```
-[LEGEND]
-# Context pack: {title}
-- id: ...
-- name: ...
-- status: finalized
-- revision: 5
-- expires_at: 2026-02-20T12:00:00Z
-- ttl_remaining: 32m
-- tags: auth, api
-- brief: Authentication flow
+### RU
+1. Соберите сервер:
+   ```bash
+   cargo build --release
+   ```
+2. Выберите стабильный путь для хранилища и политику source root.
+3. Добавьте блок `context_pack` в конфиг MCP-клиента (`config.toml` или `mcp.json`).
+4. Перезапустите MCP-клиент/сессию.
+5. Smoke-проверка:
+   - вызовите `input` с `{ "action": "list" }`
+   - вызовите `output` с `{ "action": "list" }`
+6. Для explorer/reviewer агентов: в чат отправлять только `pack_id + короткий summary`, все доказательства хранить внутри context-pack.
 
-[CONTENT]
-## Section Title [section-key]
-Section description
+---
 
-### group: core
-#### ref-key [section-key]
-**Ref Title**
-- path: src/auth/handler.rs
-- lines: 42-67
-- why: Main entry point for token validation
+## 7) Troubleshooting / Диагностика
 
-```rust
-  42: pub async fn validate_token(token: &str) -> Result<Claims> {
-  ...
-  67: }
-```
-```
+- `revision_conflict`  
+  EN: read latest pack (`get`) and retry with new `expected_revision`.  
+  RU: перечитайте пакет (`get`) и повторите мутацию с новым `expected_revision`.
 
-## Environment variables
+- `stale_ref`  
+  EN: file/lines moved; update or delete stale ref.  
+  RU: файл/строки изменились; обновите или удалите устаревший ref.
 
-| Variable | Default | Description |
-|---|---|---|
-| `CONTEXT_PACK_ROOT` | `.agents/mcp/context_pack` | Storage directory |
-| `CONTEXT_PACK_SOURCE_ROOT` | CWD | Repository root for resolving file paths. Special values `__SESSION_CWD__`, `session_cwd`, `cwd`, `.` force current working directory. |
-| `CONTEXT_PACK_LOG` | `mcp_context_pack=info` | Log level (stderr) |
-| `CONTEXT_PACK_INITIALIZE_TIMEOUT_MS` | `20000` | Max wait for first `initialize` request before server exits (prevents orphan MCP processes). |
+- `not_found`  
+  EN: pack may have expired by TTL.  
+  RU: пакет мог истечь по TTL.
 
-## Storage
-
-Packs are stored as YAML frontmatter files:
-```
-{CONTEXT_PACK_ROOT}/packs/{pack-id}.md
-```
-
-Storage integrity policy is fail-closed:
-- malformed pack files cause list/get to return `io_error` (they are never silently skipped).
-- schema version mismatches return `migration_required`.
-
-Lock files are expected implementation details:
-- `.create.lock` for global create-name uniqueness
-- `{pack-id}.lock` for per-pack revision-safe writes
-
-## Build and run
-
-```bash
-cargo build --release
-CONTEXT_PACK_ROOT=/tmp/packs cargo run
-```
-
-## Verification (production gates)
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-```
-
-## Architecture
-
-```
-Domain (pure):   errors, types, models (invariants, FSM)
-       down
-Ports:           PackRepositoryPort, CodeExcerptPort
-       down
-App (usecases):  InputUseCases, OutputUseCases
-       down
-Adapters:        MarkdownStorageAdapter, CodeExcerptFsAdapter, mcp_stdio
-```
-
-Hexagonal architecture: domain has zero external dependencies.
+- `tool output too large`  
+  EN: rendered output exceeded size limit (~1 MiB). Split pack into smaller sections.  
+  RU: итоговый output превысил лимит (~1 MiB). Разбейте пакет на более мелкие секции.
