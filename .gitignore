@@ -1,0 +1,6 @@
+/target/
+/.agents/
+**/*.log
+.DS_Store
+.idea/
+.vscode/
