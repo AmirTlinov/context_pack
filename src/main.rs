@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use mcp_context_pack::app::ports::PackRepositoryPort as _;
+use mcp_context_pack::app::ports::PackRepositoryPort;
 
 fn source_root_from_env_or_cwd() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -50,16 +50,17 @@ async fn main() -> anyhow::Result<()> {
 
     let storage =
         Arc::new(mcp_context_pack::adapters::storage_json::JsonStorageAdapter::new(storage_dir));
+    let repo: Arc<dyn PackRepositoryPort> = storage;
 
     // Background TTL cleanup: purge expired packs every 30 minutes.
     // The interval fires immediately on first tick, so cleanup also runs at startup.
     {
-        let s = storage.clone();
+        let repo_for_bg = repo.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30 * 60));
             loop {
                 interval.tick().await;
-                if let Err(e) = s.purge_expired().await {
+                if let Err(e) = repo_for_bg.purge_expired().await {
                     tracing::warn!("background TTL purge failed: {e}");
                 }
             }
@@ -72,11 +73,11 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let input_uc = Arc::new(mcp_context_pack::app::input_usecases::InputUseCases::new(
-        storage.clone(),
+        repo.clone(),
         excerpts.clone(),
     ));
     let output_uc = Arc::new(mcp_context_pack::app::output_usecases::OutputUseCases::new(
-        storage.clone(),
+        repo.clone(),
         excerpts.clone(),
     ));
 
