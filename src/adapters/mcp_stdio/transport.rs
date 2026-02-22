@@ -54,7 +54,7 @@ where
     };
 
     if first == b'{' || first == b'[' {
-        let line = read_line_from_first_byte(reader, first).await?;
+        let line = read_line_from_first_byte(reader, first, max_frame_bytes).await?;
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.len() > max_frame_bytes {
             return Err(anyhow::anyhow!(
@@ -71,7 +71,7 @@ where
         return Ok(Some((trimmed.to_string(), TransportMode::JsonLine)));
     }
 
-    let first_line = read_line_from_first_byte(reader, first).await?;
+    let first_line = read_line_from_first_byte(reader, first, max_frame_bytes).await?;
     let trimmed = first_line.trim_end_matches(['\r', '\n']);
     if trimmed.trim().is_empty() {
         return Ok(Some((String::new(), TransportMode::Framed)));
@@ -82,7 +82,7 @@ where
 
     // consume remaining headers until empty line
     loop {
-        let line = read_line(reader).await?;
+        let line = read_line(reader, max_frame_bytes).await?;
         if line.is_empty() {
             return Err(anyhow::anyhow!(
                 "unexpected EOF while reading frame headers"
@@ -110,6 +110,7 @@ where
 async fn read_line_from_first_byte<R>(
     reader: &mut BufReader<R>,
     first: u8,
+    max_frame_bytes: usize,
 ) -> anyhow::Result<String>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -121,10 +122,17 @@ where
         return Ok(String::from_utf8_lossy(&buf).into_owned());
     }
     buf.extend_from_slice(&tail);
+    if buf.len() > max_frame_bytes {
+        return Err(anyhow::anyhow!(
+            "incoming frame too large: {} bytes (max {})",
+            buf.len(),
+            max_frame_bytes
+        ));
+    }
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-async fn read_line<R>(reader: &mut BufReader<R>) -> anyhow::Result<String>
+async fn read_line<R>(reader: &mut BufReader<R>, max_frame_bytes: usize) -> anyhow::Result<String>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -132,6 +140,13 @@ where
     let n = reader.read_until(b'\n', &mut buf).await?;
     if n == 0 {
         return Ok(String::new());
+    }
+    if buf.len() > max_frame_bytes {
+        return Err(anyhow::anyhow!(
+            "incoming frame too large: {} bytes (max {})",
+            buf.len(),
+            max_frame_bytes
+        ));
     }
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
