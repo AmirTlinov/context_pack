@@ -41,13 +41,64 @@ With `context-pack`, agents place anchors (`path + line range`) via `input`, and
 
 ---
 
+## Install from GitHub Releases (recommended)
+
+### One-line install (Linux/macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AmirTlinov/context_pack/main/scripts/install.sh | bash
+```
+
+Pin a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AmirTlinov/context_pack/main/scripts/install.sh | CONTEXT_PACK_VERSION=v0.1.0 bash
+```
+
+Install to a custom directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AmirTlinov/context_pack/main/scripts/install.sh | CONTEXT_PACK_INSTALL_DIR="$HOME/bin" bash
+```
+
+### One-line install (Windows PowerShell)
+
+```powershell
+iwr https://raw.githubusercontent.com/AmirTlinov/context_pack/main/scripts/install.ps1 -UseBasicParsing | iex
+```
+
+> Installers verify downloaded artifacts against `checksums.sha256` from the same release.
+
+### Homebrew (macOS/Linux)
+
+```bash
+brew install --formula https://github.com/AmirTlinov/context_pack/releases/latest/download/mcp-context-pack.rb
+```
+
+### Scoop (Windows)
+
+```powershell
+scoop install https://github.com/AmirTlinov/context_pack/releases/latest/download/mcp-context-pack.json
+```
+
+### Manual install
+
+1. Open **GitHub Releases** and download the archive for your OS/CPU.
+2. Unpack `mcp-context-pack` (`.exe` on Windows).
+3. Put it into your PATH (for example `~/.local/bin` on Linux/macOS).
+
+> Release artifacts are published on each tag `v*` via `.github/workflows/release.yml`.
+> Maintainers: release playbook is in `RELEASE.md`.
+
+---
+
 ## Configuration (`config.toml` / `mcp.json`)
 
 ### Codex `config.toml`
 
 ```toml
 [mcp_servers.context_pack]
-command = "/absolute/path/to/mcp-context-pack"
+command = "mcp-context-pack"
 args = []
 
 [mcp_servers.context_pack.env]
@@ -65,7 +116,7 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 {
   "mcpServers": {
     "context_pack": {
-      "command": "/absolute/path/to/mcp-context-pack",
+      "command": "mcp-context-pack",
       "args": [],
       "env": {
         "CONTEXT_PACK_ROOT": "/absolute/path/to/context-pack-data",
@@ -84,7 +135,7 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 
 | Parameter | Meaning |
 |---|---|
-| `command` | Absolute path to server binary |
+| `command` | Binary path or executable name in `PATH` (recommended: `mcp-context-pack`) |
 | `args` | Optional CLI args (usually `[]`) |
 | `CONTEXT_PACK_ROOT` | Storage root (`{root}/packs/*.json`) |
 | `CONTEXT_PACK_SOURCE_ROOT` | Source root used to resolve anchors into code excerpts (`__SESSION_CWD__`, `session_cwd`, `cwd`, `.` = current session dir) |
@@ -101,10 +152,13 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 
 ## Install for agents (step-by-step)
 
-1. Build:
-   ```bash
-   cargo build --release
-   ```
+1. Install `mcp-context-pack`:
+   - from Releases (recommended), or
+   - from source:
+     ```bash
+     cargo build --release
+     # binary: target/release/mcp-context-pack
+     ```
 2. Choose stable dirs:
    - storage root (`CONTEXT_PACK_ROOT`)
    - source root policy (`CONTEXT_PACK_SOURCE_ROOT`)
@@ -169,13 +223,64 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 
 ---
 
+## Установка из GitHub Releases (рекомендуется)
+
+### Установка одной командой (Linux/macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AmirTlinov/context_pack/main/scripts/install.sh | bash
+```
+
+Зафиксировать конкретную версию:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AmirTlinov/context_pack/main/scripts/install.sh | CONTEXT_PACK_VERSION=v0.1.0 bash
+```
+
+Установить в нестандартную директорию:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AmirTlinov/context_pack/main/scripts/install.sh | CONTEXT_PACK_INSTALL_DIR="$HOME/bin" bash
+```
+
+### Установка одной командой (Windows PowerShell)
+
+```powershell
+iwr https://raw.githubusercontent.com/AmirTlinov/context_pack/main/scripts/install.ps1 -UseBasicParsing | iex
+```
+
+> Инсталлеры проверяют скачанный архив по `checksums.sha256` из того же релиза.
+
+### Homebrew (macOS/Linux)
+
+```bash
+brew install --formula https://github.com/AmirTlinov/context_pack/releases/latest/download/mcp-context-pack.rb
+```
+
+### Scoop (Windows)
+
+```powershell
+scoop install https://github.com/AmirTlinov/context_pack/releases/latest/download/mcp-context-pack.json
+```
+
+### Ручная установка
+
+1. Откройте **GitHub Releases** и скачайте архив под вашу ОС/архитектуру.
+2. Распакуйте `mcp-context-pack` (`.exe` на Windows).
+3. Положите бинарник в `PATH` (например, `~/.local/bin` на Linux/macOS).
+
+> Release-артефакты публикуются на каждый тег `v*` через `.github/workflows/release.yml`.
+> Для сопровождающих: сценарий релиза описан в `RELEASE.md`.
+
+---
+
 ## Настройка (`config.toml` / `mcp.json`)
 
 ### Codex `config.toml`
 
 ```toml
 [mcp_servers.context_pack]
-command = "/absolute/path/to/mcp-context-pack"
+command = "mcp-context-pack"
 args = []
 
 [mcp_servers.context_pack.env]
@@ -193,7 +298,7 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 {
   "mcpServers": {
     "context_pack": {
-      "command": "/absolute/path/to/mcp-context-pack",
+      "command": "mcp-context-pack",
       "args": [],
       "env": {
         "CONTEXT_PACK_ROOT": "/absolute/path/to/context-pack-data",
@@ -212,7 +317,7 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 
 | Параметр | Назначение |
 |---|---|
-| `command` | Абсолютный путь к бинарнику сервера |
+| `command` | Путь к бинарнику или имя команды в `PATH` (рекомендуется: `mcp-context-pack`) |
 | `args` | Опциональные аргументы CLI (обычно `[]`) |
 | `CONTEXT_PACK_ROOT` | Корень хранилища (`{root}/packs/*.json`) |
 | `CONTEXT_PACK_SOURCE_ROOT` | Корень исходников для превращения якорей в вырезки (`__SESSION_CWD__`, `session_cwd`, `cwd`, `.` = текущая директория сессии) |
@@ -229,10 +334,13 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 
 ## Пошаговая установка для агентов
 
-1. Соберите сервер:
-   ```bash
-   cargo build --release
-   ```
+1. Установите `mcp-context-pack`:
+   - из Releases (рекомендуется), или
+   - соберите из исходников:
+     ```bash
+     cargo build --release
+     # бинарник: target/release/mcp-context-pack
+     ```
 2. Выберите стабильные пути:
    - корень хранилища (`CONTEXT_PACK_ROOT`)
    - политика source root (`CONTEXT_PACK_SOURCE_ROOT`)

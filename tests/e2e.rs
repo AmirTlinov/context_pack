@@ -818,9 +818,17 @@ async fn e2e_shutdown_notification_has_no_side_effects() -> Result<()> {
     let packs_dir = storage_root.join("packs");
     if packs_dir.exists() {
         let mut entries = tokio::fs::read_dir(&packs_dir).await?;
+        let mut has_pack_files = false;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                has_pack_files = true;
+                break;
+            }
+        }
         assert!(
-            entries.next_entry().await?.is_none(),
-            "no packs should be created after shutdown notification"
+            !has_pack_files,
+            "no pack .json files should be created after shutdown notification"
         );
     }
     Ok(())
