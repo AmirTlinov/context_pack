@@ -23,7 +23,7 @@ use tool_input::handle_input_tool;
 use tool_output::handle_output_tool;
 use transport::{read_next_message, write_response, TransportMode};
 
-const MAX_FRAME_BYTES: usize = 1024 * 1024; // 1 MiB
+const MAX_FRAME_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 
 fn parse_initialize_timeout_ms(raw: Option<&str>) -> Duration {
     const DEFAULT_SECS: u64 = 20;
@@ -509,6 +509,40 @@ mod tests {
         let mut reader = BufReader::new(frame.as_bytes());
         let result = read_next_message(&mut reader, MAX_FRAME_BYTES).await;
         assert!(result.is_err(), "should reject frames exceeding max size");
+    }
+
+    #[tokio::test]
+    async fn test_oversized_header_line_is_rejected() {
+        // Simulate a framed message whose first header line exceeds max_frame_bytes.
+        // This exercises the read_until size check in read_line_from_first_byte,
+        // which previously had no bound and could cause OOM.
+        let tiny_max: usize = 64;
+        // Build a header line longer than tiny_max, with no newline so read_until
+        // must buffer the whole thing before returning.
+        let huge_header = format!("X-Huge: {}\n", "A".repeat(tiny_max + 1));
+        let mut reader = BufReader::new(huge_header.as_bytes());
+        let result = read_next_message(&mut reader, tiny_max).await;
+        assert!(result.is_err(), "should reject oversized header lines");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("incoming frame too large") || msg.contains("too large"),
+            "unexpected error: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_oversized_json_line_is_rejected() {
+        // A JSON line that exceeds max_frame_bytes must be rejected before processing.
+        let tiny_max: usize = 20;
+        // A valid-looking JSON object that is longer than tiny_max.
+        let huge_json = format!(
+            "{{{}}}\n",
+            "\"k\":\"".to_string() + &"v".repeat(tiny_max) + "\""
+        );
+        let mut reader = BufReader::new(huge_json.as_bytes());
+        let result = read_next_message(&mut reader, tiny_max).await;
+        assert!(result.is_err(), "should reject oversized JSON line");
     }
 
     #[test]
