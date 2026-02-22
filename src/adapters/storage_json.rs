@@ -414,9 +414,18 @@ impl PackRepositoryPort for JsonStorageAdapter {
 mod tests {
     use super::*;
     use crate::domain::types::{PackId, PackName};
+    use chrono::Duration;
+    use std::path::Path;
+    use tempfile::tempdir;
 
     fn make_pack() -> Pack {
         Pack::new(PackId::new(), Some(PackName::new("test-pack").unwrap()))
+    }
+
+    fn make_expired_pack() -> Pack {
+        let mut pack = Pack::new(PackId::new(), None);
+        pack.expires_at = Utc::now() - Duration::seconds(1);
+        pack
     }
 
     #[test]
@@ -433,5 +442,112 @@ mod tests {
     fn test_decode_rejects_malformed() {
         assert!(JsonStorageAdapter::decode("not-json").is_err());
         assert!(JsonStorageAdapter::decode("{}").is_err());
+    }
+
+    #[test]
+    fn test_purge_expired_removes_only_expired() {
+        let dir = tempdir().unwrap();
+        let active = make_pack();
+        let expired = make_expired_pack();
+
+        // Write both packs
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &active).unwrap();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &expired).unwrap();
+
+        // Both files should exist
+        assert!(dir
+            .path()
+            .join(format!("{}.json", active.id.as_str()))
+            .exists());
+        assert!(dir
+            .path()
+            .join(format!("{}.json", expired.id.as_str()))
+            .exists());
+
+        // Run purge
+        JsonStorageAdapter::purge_expired_sync(dir.path(), DEFAULT_MAX_PACK_BYTES).unwrap();
+
+        // Active pack should remain, expired should be gone
+        assert!(
+            dir.path()
+                .join(format!("{}.json", active.id.as_str()))
+                .exists(),
+            "active pack should still exist"
+        );
+        assert!(
+            !dir.path()
+                .join(format!("{}.json", expired.id.as_str()))
+                .exists(),
+            "expired pack should have been removed"
+        );
+    }
+
+    #[test]
+    fn test_load_all_active_excludes_expired() {
+        let dir = tempdir().unwrap();
+        let active = make_pack();
+        let expired = make_expired_pack();
+
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &active).unwrap();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &expired).unwrap();
+
+        let loaded =
+            JsonStorageAdapter::load_all_active_sync(dir.path(), DEFAULT_MAX_PACK_BYTES).unwrap();
+
+        assert_eq!(loaded.len(), 1, "only 1 active pack expected");
+        assert_eq!(
+            loaded[0].id, active.id,
+            "loaded pack should be the active one"
+        );
+    }
+
+    #[test]
+    fn test_list_pack_paths_nonexistent_dir() {
+        let result =
+            JsonStorageAdapter::list_pack_paths_sync(Path::new("/nonexistent/path/xyz/abc_12345"));
+        assert!(result.is_ok(), "should not error on missing dir");
+        assert!(result.unwrap().is_empty(), "should return empty vec");
+    }
+
+    #[test]
+    fn test_write_pack_atomic_persists_and_is_decodable() {
+        let dir = tempdir().unwrap();
+        let pack = make_pack();
+
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &pack).unwrap();
+
+        let expected_path = dir.path().join(format!("{}.json", pack.id.as_str()));
+        assert!(expected_path.exists(), "pack file should exist after write");
+
+        // Should be decodable
+        let decoded =
+            JsonStorageAdapter::read_pack_from_path(&expected_path, DEFAULT_MAX_PACK_BYTES)
+                .unwrap();
+        assert_eq!(decoded.id, pack.id);
+        assert_eq!(decoded.schema_version, pack.schema_version);
+    }
+
+    #[test]
+    fn test_decode_with_path_wraps_migration_error() {
+        // A JSON that deserializes but fails schema migration (schema_version != CURRENT_SCHEMA_VERSION)
+        // Encode a valid pack, then manually patch schema_version to an unsupported value.
+        let pack = make_pack();
+        let mut json_val: serde_json::Value =
+            serde_json::from_str(&JsonStorageAdapter::encode(&pack).unwrap()).unwrap();
+        json_val["schema_version"] = serde_json::Value::Number(1u64.into());
+        let patched = serde_json::to_string(&json_val).unwrap();
+
+        let fake_path = Path::new("/storage/pk_testtest.json");
+        let err = JsonStorageAdapter::decode_with_path(fake_path, &patched).unwrap_err();
+
+        match err {
+            DomainError::MigrationRequired(msg) => {
+                assert!(
+                    msg.contains("pk_testtest.json"),
+                    "error message should contain file path, got: {msg}"
+                );
+            }
+            other => panic!("expected MigrationRequired, got: {:?}", other),
+        }
     }
 }
