@@ -48,6 +48,22 @@ async fn main() -> anyhow::Result<()> {
 
     let storage =
         Arc::new(mcp_context_pack::adapters::storage_json::JsonStorageAdapter::new(storage_dir));
+
+    // Background TTL cleanup: purge expired packs every 30 minutes.
+    // The interval fires immediately on first tick, so cleanup also runs at startup.
+    {
+        let s = storage.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30 * 60));
+            loop {
+                interval.tick().await;
+                if let Err(e) = s.purge_expired().await {
+                    tracing::warn!("background TTL purge failed: {e}");
+                }
+            }
+        });
+    }
+
     let excerpts = Arc::new(
         mcp_context_pack::adapters::code_excerpt_fs::CodeExcerptFsAdapter::new(source_root)
             .map_err(anyhow::Error::new)?,
