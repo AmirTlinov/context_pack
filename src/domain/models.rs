@@ -575,4 +575,65 @@ mod tests {
         let mut pack = make_pack();
         assert!(pack.set_meta(None, None, None).is_err());
     }
+
+    #[test]
+    fn test_is_expired_when_past() {
+        let mut pack = Pack::new(PackId::new(), None);
+        pack.expires_at = Utc::now() - Duration::seconds(1);
+        assert!(
+            pack.is_expired(Utc::now()),
+            "pack with past expires_at should be expired"
+        );
+    }
+
+    #[test]
+    fn test_is_expired_when_future() {
+        let pack = Pack::new(PackId::new(), None);
+        // default expires_at is now + 24h
+        assert!(
+            !pack.is_expired(Utc::now()),
+            "freshly created pack should not be expired"
+        );
+    }
+
+    #[test]
+    fn test_ttl_remaining_human_expired() {
+        let mut pack = Pack::new(PackId::new(), None);
+        pack.expires_at = Utc::now() - Duration::seconds(10);
+        assert_eq!(pack.ttl_remaining_human(Utc::now()), "expired");
+    }
+
+    #[test]
+    fn test_ttl_remaining_human_minutes() {
+        let mut pack = Pack::new(PackId::new(), None);
+        // Set expires_at to exactly 5 minutes from now; pass the same `now` to both
+        let now = Utc::now();
+        pack.expires_at = now + Duration::seconds(300);
+        assert_eq!(pack.ttl_remaining_human(now), "5m");
+    }
+
+    #[test]
+    fn test_ttl_remaining_human_hours() {
+        let mut pack = Pack::new(PackId::new(), None);
+        // Set expires_at to exactly 2 hours from now; pass the same `now` to both
+        let now = Utc::now();
+        pack.expires_at = now + Duration::seconds(7200);
+        assert_eq!(pack.ttl_remaining_human(now), "2h");
+    }
+
+    #[test]
+    fn test_extend_ttl_from_now_when_already_expired() {
+        let mut pack = Pack::new(PackId::new(), None);
+        // Make the pack already expired
+        pack.expires_at = Utc::now() - Duration::seconds(100);
+        let now = Utc::now();
+        // extend_ttl should extend from now (not from the expired time)
+        pack.extend_ttl(60, now).unwrap();
+        let remaining = pack.ttl_remaining_seconds(now);
+        // Should be approximately 60 minutes = 3600 seconds
+        assert!(
+            remaining > 3500 && remaining <= 3600,
+            "remaining should be ~3600s, got: {remaining}"
+        );
+    }
 }
