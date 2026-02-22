@@ -180,6 +180,13 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 - All mutating actions except `create` require `expected_revision`.
 - `create` requires `ttl_minutes`.
 - `touch_ttl` accepts exactly one: `ttl_minutes` or `extend_minutes`.
+- `output` actions stay `list|get` (no extra tool/action sprawl).
+- `output get` additive args: `mode(full|compact)`, `limit`, `offset`, `cursor`, `match` (regex).
+- Backward compatibility: `output get` without paging args keeps legacy full markdown shape.
+- `mode=compact` keeps ref metadata and stale markers, but omits code fences for refs.
+- Paging contract: `limit` + (`offset` first page or `cursor` continuation) with deterministic legend fields `has_more` + `next`.
+- Cursor is fail-closed (`invalid_cursor` in message, `invalid_data` code) on stale/mismatch state.
+- `match` invalid regex returns validation error (`invalid_data`) with explicit reason.
 - `output` is always markdown (`format` is rejected).
 
 ---
@@ -362,6 +369,13 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 - Все мутации, кроме `create`, требуют `expected_revision`.
 - `create` требует `ttl_minutes`.
 - `touch_ttl` принимает строго одно: `ttl_minutes` или `extend_minutes`.
+- `output` остаётся с actions только `list|get` (без разрастания API).
+- Дополнительные аргументы `output get`: `mode(full|compact)`, `limit`, `offset`, `cursor`, `match` (regex).
+- Обратная совместимость: `output get` без paging-аргументов возвращает прежний full-markdown формат.
+- `mode=compact` сохраняет метаданные ref и stale-маркеры, но убирает code fences у ref.
+- Paging-контракт: `limit` + (`offset` для первой страницы или `cursor` для продолжения) с детерминированными `has_more` и `next` в LEGEND.
+- Cursor fail-closed: при stale/mismatch возвращается `invalid_data` с семантикой `invalid_cursor` в message.
+- Невалидный regex в `match` возвращает validation error (`invalid_data`) с явной причиной.
 - `output` всегда markdown (`format` отклоняется).
 
 ---
