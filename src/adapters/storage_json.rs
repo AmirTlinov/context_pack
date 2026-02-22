@@ -169,7 +169,7 @@ impl JsonStorageAdapter {
         Ok(packs)
     }
 
-    pub async fn purge_expired(&self) -> Result<()> {
+    async fn purge_expired_locked(&self) -> Result<()> {
         let storage_dir = self.storage_dir.clone();
         let max_pack_bytes = self.max_pack_bytes;
         task::spawn_blocking(move || -> Result<()> {
@@ -407,6 +407,10 @@ impl PackRepositoryPort for JsonStorageAdapter {
         })
         .await
         .map_err(|e| DomainError::Io(format!("task execution failed: {}", e)))?
+    }
+
+    async fn purge_expired(&self) -> Result<()> {
+        self.purge_expired_locked().await
     }
 }
 
