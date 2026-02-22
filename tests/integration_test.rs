@@ -553,7 +553,7 @@ async fn test_malformed_pack_file_fails_closed() {
 
     let (input_uc, _) = build_services(storage_dir, tmp.path().to_path_buf());
     let listed = input_uc.list(None, None, None, None).await;
-    assert!(matches!(listed, Err(DomainError::Io(_))));
+    assert!(matches!(listed, Err(DomainError::Deserialize(_))));
 }
 
 #[tokio::test]
