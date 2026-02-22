@@ -80,8 +80,10 @@ resolve_version() {
 }
 
 main() {
-  local target tag archive_name checksums_name download_url checksums_url tmp_dir archive_path checksums_path extracted_bin
+  local target tag archive_name checksums_name download_url checksums_url archive_path checksums_path extracted_bin
   local expected_sha actual_sha
+  # global (not local): referenced by EXIT trap
+  TMP_DIR=""
 
   target="$(detect_target)"
   tag="$(resolve_version)"
@@ -90,11 +92,11 @@ main() {
   download_url="https://github.com/${REPO}/releases/download/${tag}/${archive_name}"
   checksums_url="https://github.com/${REPO}/releases/download/${tag}/${checksums_name}"
 
-  tmp_dir="$(mktemp -d)"
-  trap 'rm -rf "$tmp_dir"' EXIT
+  TMP_DIR="$(mktemp -d)"
+  trap 'rm -rf "$TMP_DIR"' EXIT
 
-  archive_path="${tmp_dir}/${archive_name}"
-  checksums_path="${tmp_dir}/${checksums_name}"
+  archive_path="${TMP_DIR}/${archive_name}"
+  checksums_path="${TMP_DIR}/${checksums_name}"
 
   echo "→ Downloading ${archive_name} (${tag}) from ${REPO}"
   curl -fL "$download_url" -o "$archive_path"
@@ -117,8 +119,8 @@ main() {
     exit 1
   fi
 
-  tar -xzf "$archive_path" -C "$tmp_dir"
-  extracted_bin="${tmp_dir}/${BINARY_NAME}"
+  tar -xzf "$archive_path" -C "$TMP_DIR"
+  extracted_bin="${TMP_DIR}/${BINARY_NAME}"
 
   if [[ ! -f "$extracted_bin" ]]; then
     echo "error: binary '${BINARY_NAME}' not found in archive ${archive_name}" >&2
