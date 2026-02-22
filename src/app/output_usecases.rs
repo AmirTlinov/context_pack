@@ -17,17 +17,12 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputMode {
+    #[default]
     Full,
     Compact,
-}
-
-impl Default for OutputMode {
-    fn default() -> Self {
-        Self::Full
-    }
 }
 
 impl fmt::Display for OutputMode {
@@ -618,7 +613,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(raw: &str) -> std::result::Result<Vec<u8>, String> {
-    if raw.len() % 2 != 0 {
+    if !raw.len().is_multiple_of(2) {
         return Err("hex length must be even".into());
     }
 
