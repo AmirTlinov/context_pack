@@ -180,11 +180,7 @@ impl InputUseCases {
 
             match self.repo.create_new(&pack).await {
                 Ok(()) => return Ok(pack),
-                Err(DomainError::Conflict(msg))
-                    if msg.starts_with("pack id ") && msg.ends_with(" already exists") =>
-                {
-                    continue;
-                }
+                Err(DomainError::PackIdConflict(_)) => continue,
                 Err(e) => return Err(e),
             }
         }
