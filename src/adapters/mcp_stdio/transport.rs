@@ -117,7 +117,11 @@ where
 {
     let mut buf = vec![first];
     let mut tail = Vec::new();
-    let n = reader.read_until(b'\n', &mut tail).await?;
+    // Use take(max_frame_bytes + 1) to cap allocation before the size check fires,
+    // preventing OOM from an unbounded line with no newline.
+    let mut limited = (&mut *reader).take(max_frame_bytes as u64 + 1);
+    let n = limited.read_until(b'\n', &mut tail).await?;
+    drop(limited);
     if n == 0 {
         return Ok(String::from_utf8_lossy(&buf).into_owned());
     }
@@ -137,7 +141,11 @@ where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut buf = Vec::new();
-    let n = reader.read_until(b'\n', &mut buf).await?;
+    // Use take(max_frame_bytes + 1) to cap allocation before the size check fires,
+    // preventing OOM from an unbounded line with no newline.
+    let mut limited = (&mut *reader).take(max_frame_bytes as u64 + 1);
+    let n = limited.read_until(b'\n', &mut buf).await?;
+    drop(limited);
     if n == 0 {
         return Ok(String::new());
     }
