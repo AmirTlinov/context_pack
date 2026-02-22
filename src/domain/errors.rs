@@ -26,6 +26,9 @@ pub enum DomainError {
     #[error("{0}")]
     Io(String),
 
+    #[error("failed to deserialize: {0}")]
+    Deserialize(String),
+
     #[error("schema migration required: {0}")]
     MigrationRequired(String),
 }
@@ -40,6 +43,6 @@ impl From<std::io::Error> for DomainError {
 
 impl From<serde_json::Error> for DomainError {
     fn from(err: serde_json::Error) -> Self {
-        Self::Io(err.to_string())
+        Self::Deserialize(err.to_string())
     }
 }

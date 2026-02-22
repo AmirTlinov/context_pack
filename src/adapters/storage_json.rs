@@ -66,7 +66,7 @@ impl JsonStorageAdapter {
             Err(DomainError::MigrationRequired(msg)) => Err(DomainError::MigrationRequired(
                 format!("{} [path={}]", msg, path.display()),
             )),
-            Err(err) => Err(DomainError::Io(format!(
+            Err(err) => Err(DomainError::Deserialize(format!(
                 "failed to decode pack '{}': {}",
                 path.display(),
                 err
