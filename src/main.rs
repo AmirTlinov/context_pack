@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use mcp_context_pack::app::ports::PackRepositoryPort as _;
+
 fn source_root_from_env_or_cwd() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
