@@ -17,6 +17,13 @@ use crate::{
 
 const DEFAULT_MAX_PACK_BYTES: usize = 512 * 1024;
 
+/// Minimal pack metadata needed for TTL purge scanning.
+/// Avoids deserializing full Pack (sections, refs, diagrams).
+#[derive(serde::Deserialize)]
+struct PackMeta {
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 fn parse_max_pack_bytes_from_env() -> usize {
     std::env::var("CONTEXT_PACK_MAX_PACK_BYTES")
         .ok()
@@ -134,12 +141,25 @@ impl JsonStorageAdapter {
         Ok(())
     }
 
+    fn read_pack_meta_from_path(path: &Path, max_pack_bytes: usize) -> Option<PackMeta> {
+        let file_len = std::fs::metadata(path).ok()?.len() as usize;
+        if file_len > max_pack_bytes {
+            return None;
+        }
+        let raw = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str::<PackMeta>(&raw).ok()
+    }
+
     fn purge_expired_sync(storage_dir: &Path, max_pack_bytes: usize) -> Result<()> {
         let now = Utc::now();
         let paths = Self::list_pack_paths_sync(storage_dir)?;
         for path in paths {
-            let pack = Self::read_pack_from_path(&path, max_pack_bytes)?;
-            if pack.is_expired(now) {
+            let meta = Self::read_pack_meta_from_path(&path, max_pack_bytes);
+            let is_expired = meta
+                .and_then(|m| m.expires_at)
+                .map(|t| t <= now)
+                .unwrap_or(false);
+            if is_expired {
                 match std::fs::remove_file(&path) {
                     Ok(()) => {}
                     Err(e) if e.kind() == ErrorKind::NotFound => {}
