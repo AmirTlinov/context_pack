@@ -230,10 +230,7 @@ impl PackRepositoryPort for JsonStorageAdapter {
             let path = Self::pack_path(&storage_dir, &pack.id);
             if path.exists() {
                 lock.unlock().ok();
-                return Err(DomainError::Conflict(format!(
-                    "pack id '{}' already exists",
-                    pack.id
-                )));
+                return Err(DomainError::PackIdConflict(pack.id.to_string()));
             }
 
             if let Some(new_name) = &pack.name {
