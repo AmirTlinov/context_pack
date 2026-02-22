@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
 use crate::{
-    app::ports::{CodeExcerptPort, ListFilter, PackRepositoryPort},
+    app::{
+        ports::{CodeExcerptPort, ListFilter, PackRepositoryPort},
+        resolver::resolve_pack,
+    },
     domain::{
         errors::{DomainError, Result},
         models::Pack,
-        types::{PackId, PackName, Status},
+        types::Status,
     },
 };
 
@@ -19,32 +22,10 @@ impl OutputUseCases {
         Self { repo, excerpt }
     }
 
-    // ── identity resolution (same as input, no sharing to keep layers clean) ──
+    // ── identity resolution ───────────────────────────────────────────────────
 
     async fn resolve(&self, identifier: &str) -> Result<Pack> {
-        let identifier = identifier.trim();
-        if identifier.is_empty() {
-            return Err(DomainError::InvalidData(
-                "identifier (id or name) is required".into(),
-            ));
-        }
-        if let Ok(id) = PackId::parse(identifier) {
-            if let Some(pack) = self.repo.get_by_id(&id).await? {
-                return Ok(pack);
-            }
-            return Err(DomainError::NotFound(format!(
-                "pack '{}' not found",
-                identifier
-            )));
-        }
-        let name = PackName::new(identifier)?;
-        if let Some(pack) = self.repo.get_by_name(&name).await? {
-            return Ok(pack);
-        }
-        Err(DomainError::NotFound(format!(
-            "pack '{}' not found",
-            identifier
-        )))
+        resolve_pack(self.repo.as_ref(), identifier).await
     }
 
     // ── list ──────────────────────────────────────────────────────────────────
