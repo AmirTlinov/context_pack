@@ -311,7 +311,6 @@ impl PackRepositoryPort for JsonStorageAdapter {
     }
 
     async fn get_by_id(&self, id: &PackId) -> Result<Option<Pack>> {
-        self.purge_expired().await?;
         let storage_dir = self.storage_dir.clone();
         let id = id.clone();
         let max_pack_bytes = self.max_pack_bytes;
@@ -342,7 +341,6 @@ impl PackRepositoryPort for JsonStorageAdapter {
     }
 
     async fn get_by_name(&self, name: &PackName) -> Result<Option<Pack>> {
-        self.purge_expired().await?;
         let storage_dir = self.storage_dir.clone();
         let max_pack_bytes = self.max_pack_bytes;
         let name = name.clone();
@@ -365,7 +363,6 @@ impl PackRepositoryPort for JsonStorageAdapter {
     }
 
     async fn list_packs(&self, filter: ListFilter) -> Result<Vec<Pack>> {
-        self.purge_expired().await?;
         let storage_dir = self.storage_dir.clone();
         let max_pack_bytes = self.max_pack_bytes;
         task::spawn_blocking(move || -> Result<Vec<Pack>> {
