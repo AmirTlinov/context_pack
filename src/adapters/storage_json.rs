@@ -169,7 +169,7 @@ impl JsonStorageAdapter {
         Ok(packs)
     }
 
-    async fn purge_expired(&self) -> Result<()> {
+    pub async fn purge_expired(&self) -> Result<()> {
         let storage_dir = self.storage_dir.clone();
         let max_pack_bytes = self.max_pack_bytes;
         task::spawn_blocking(move || -> Result<()> {
