@@ -65,6 +65,10 @@ impl PackRepositoryPort for FakePackRepo {
     async fn list_packs(&self, _filter: ListFilter) -> Result<Vec<Pack>> {
         Ok(self.0.lock().unwrap().values().cloned().collect())
     }
+
+    async fn purge_expired(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 // ── FakeExcerptPort ──────────────────────────────────────────────────────────
