@@ -588,6 +588,28 @@ mod tests {
     }
 
     #[test]
+    fn test_domain_error_contract_for_pack_id_conflict() {
+        let envelope = domain_error_response(
+            Value::from(1),
+            &DomainError::PackIdConflict("pk_abcd1234".into()),
+        );
+        let text = extract_content_text(&envelope);
+        let parsed: Value = serde_json::from_str(&text).expect("must be valid JSON");
+        assert_eq!(parsed["kind"], "conflict");
+        assert_eq!(parsed["code"], "pack_id_conflict");
+    }
+
+    #[test]
+    fn test_domain_error_contract_for_deserialize_error() {
+        let envelope =
+            domain_error_response(Value::from(1), &DomainError::Deserialize("bad json".into()));
+        let text = extract_content_text(&envelope);
+        let parsed: Value = serde_json::from_str(&text).expect("must be valid JSON");
+        assert_eq!(parsed["kind"], "deserialize_error");
+        assert_eq!(parsed["code"], "deserialize_error");
+    }
+
+    #[test]
     fn test_output_format_parameter_is_rejected() {
         let args = json!({ "format": "json" });
         let err =
