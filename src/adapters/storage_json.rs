@@ -73,6 +73,7 @@ impl JsonStorageAdapter {
             Err(DomainError::MigrationRequired(msg)) => Err(DomainError::MigrationRequired(
                 format!("{} [path={}]", msg, path.display()),
             )),
+            Err(err @ DomainError::InvalidData(_)) => Err(err),
             Err(err) => Err(DomainError::Deserialize(format!(
                 "failed to decode pack '{}': {}",
                 path.display(),
@@ -112,7 +113,7 @@ impl JsonStorageAdapter {
                 path.display()
             )));
         }
-        if meta.len() as usize > max_pack_bytes {
+        if usize::try_from(meta.len()).unwrap_or(usize::MAX) > max_pack_bytes {
             return Err(DomainError::Io(format!(
                 "pack file '{}' is too large: {} bytes (max {})",
                 path.display(),
@@ -142,12 +143,18 @@ impl JsonStorageAdapter {
     }
 
     fn read_pack_meta_from_path(path: &Path, max_pack_bytes: usize) -> Option<PackMeta> {
-        let file_len = std::fs::metadata(path).ok()?.len() as usize;
+        let file_len = usize::try_from(std::fs::metadata(path).ok()?.len()).unwrap_or(usize::MAX);
         if file_len > max_pack_bytes {
             return None;
         }
         let raw = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str::<PackMeta>(&raw).ok()
+        serde_json::from_str::<PackMeta>(&raw).ok().or_else(|| {
+            tracing::warn!(
+                "failed to parse PackMeta from '{}', file will not be purged",
+                path.display()
+            );
+            None
+        })
     }
 
     fn purge_expired_sync(storage_dir: &Path, max_pack_bytes: usize) -> Result<()> {
@@ -249,7 +256,9 @@ impl PackRepositoryPort for JsonStorageAdapter {
 
             let path = Self::pack_path(&storage_dir, &pack.id);
             if path.exists() {
-                lock.unlock().ok();
+                if let Err(e) = lock.unlock() {
+                    tracing::warn!("failed to unlock repo lock: {e}");
+                }
                 return Err(DomainError::PackIdConflict(pack.id.to_string()));
             }
 
@@ -257,7 +266,9 @@ impl PackRepositoryPort for JsonStorageAdapter {
                 for existing_path in Self::list_pack_paths_sync(&storage_dir)? {
                     let existing = Self::read_pack_from_path(&existing_path, max_pack_bytes)?;
                     if existing.name.as_ref() == Some(new_name) {
-                        lock.unlock().ok();
+                        if let Err(e) = lock.unlock() {
+                            tracing::warn!("failed to unlock repo lock: {e}");
+                        }
                         return Err(DomainError::Conflict(format!(
                             "pack with name '{}' already exists",
                             new_name
@@ -302,7 +313,9 @@ impl PackRepositoryPort for JsonStorageAdapter {
 
             let path = Self::pack_path(&storage_dir, &pack.id);
             if !path.exists() {
-                lock.unlock().ok();
+                if let Err(e) = lock.unlock() {
+                    tracing::warn!("failed to unlock repo lock: {e}");
+                }
                 return Err(DomainError::NotFound(format!(
                     "pack '{}' not found",
                     pack.id
@@ -310,7 +323,9 @@ impl PackRepositoryPort for JsonStorageAdapter {
             }
             let current = Self::read_pack_from_path(&path, max_pack_bytes)?;
             if current.revision != expected_revision {
-                lock.unlock().ok();
+                if let Err(e) = lock.unlock() {
+                    tracing::warn!("failed to unlock repo lock: {e}");
+                }
                 return Err(DomainError::RevisionConflict {
                     expected: expected_revision,
                     actual: current.revision,
@@ -369,7 +384,7 @@ impl PackRepositoryPort for JsonStorageAdapter {
             match matches.len() {
                 0 => Ok(None),
                 1 => Ok(matches.pop()),
-                _ => Err(DomainError::Conflict(format!(
+                _ => Err(DomainError::Ambiguous(format!(
                     "multiple packs found for name '{}'",
                     name
                 ))),
