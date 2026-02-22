@@ -10,6 +10,7 @@ pub(super) fn domain_error_response(id: Value, err: &DomainError) -> RpcEnvelope
         DomainError::TtlRequired(_) => ("validation", "ttl_required", Value::Null),
         DomainError::NotFound(_) => ("not_found", "not_found", Value::Null),
         DomainError::Conflict(_) => ("conflict", "conflict", Value::Null),
+        DomainError::Ambiguous(_) => ("conflict", "ambiguous", Value::Null),
         DomainError::RevisionConflict { expected, actual } => (
             "conflict",
             "revision_conflict",
