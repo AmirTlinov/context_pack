@@ -28,6 +28,9 @@ pub enum DomainError {
 
     #[error("schema migration required: {0}")]
     MigrationRequired(String),
+
+    #[error("pack id already exists: {0}")]
+    PackIdConflict(String),
 }
 
 pub type Result<T> = std::result::Result<T, DomainError>;

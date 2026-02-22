@@ -24,6 +24,7 @@ pub(super) fn domain_error_response(id: Value, err: &DomainError) -> RpcEnvelope
         DomainError::MigrationRequired(_) => {
             ("migration_required", "migration_required", Value::Null)
         }
+        DomainError::PackIdConflict(_) => ("conflict", "pack_id_conflict", Value::Null),
     };
 
     let mut payload = json!({
