@@ -1,18 +1,18 @@
 use super::errors::{DomainError, Result};
-use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Component, Path};
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 pub const MAX_REF_LINE_SPAN: usize = 2_000;
 
-static TOKEN_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[a-z0-9][a-z0-9_\-]{1,63}$").expect("token regex must compile"));
-static PACK_ID_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^pk_[a-z2-7]{8}$").expect("pack id regex must compile"));
+static TOKEN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9_\-]{1,63}$").expect("token regex must compile"));
+static PACK_ID_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^pk_[a-z2-7]{8}$").expect("pack id regex must compile"));
 
 // ── PackId ────────────────────────────────────────────────────────────────────
 

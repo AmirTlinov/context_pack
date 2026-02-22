@@ -300,7 +300,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "fs2",
- "once_cell",
  "rand",
  "regex",
  "serde",
