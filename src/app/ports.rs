@@ -16,6 +16,7 @@ pub trait PackRepositoryPort: Send + Sync {
     async fn get_by_id(&self, id: &PackId) -> Result<Option<Pack>>;
     async fn get_by_name(&self, name: &PackName) -> Result<Option<Pack>>;
     async fn list_packs(&self, filter: ListFilter) -> Result<Vec<Pack>>;
+    async fn purge_expired(&self) -> Result<()>;
 }
 
 #[async_trait]
