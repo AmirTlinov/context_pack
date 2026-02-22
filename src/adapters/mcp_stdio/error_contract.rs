@@ -21,6 +21,7 @@ pub(super) fn domain_error_response(id: Value, err: &DomainError) -> RpcEnvelope
         DomainError::InvalidState(_) => ("invalid_state", "invalid_state", Value::Null),
         DomainError::StaleRef(_) => ("stale_ref", "stale_ref", Value::Null),
         DomainError::Io(_) => ("io_error", "io_error", Value::Null),
+        DomainError::Deserialize(_) => ("deserialize_error", "deserialize_error", Value::Null),
         DomainError::MigrationRequired(_) => {
             ("migration_required", "migration_required", Value::Null)
         }
