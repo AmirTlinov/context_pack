@@ -46,11 +46,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("storage dir: {}", storage_dir.display());
     tracing::info!("source root: {}", source_root.display());
 
-    let storage = Arc::new(
-        mcp_context_pack::adapters::storage_markdown::MarkdownStorageAdapter::new(storage_dir),
-    );
+    let storage =
+        Arc::new(mcp_context_pack::adapters::storage_json::JsonStorageAdapter::new(storage_dir));
     let excerpts = Arc::new(
-        mcp_context_pack::adapters::code_excerpt_fs::CodeExcerptFsAdapter::new(source_root),
+        mcp_context_pack::adapters::code_excerpt_fs::CodeExcerptFsAdapter::new(source_root)
+            .map_err(anyhow::Error::new)?,
     );
 
     let input_uc = Arc::new(mcp_context_pack::app::input_usecases::InputUseCases::new(

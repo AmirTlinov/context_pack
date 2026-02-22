@@ -185,7 +185,7 @@ pub struct RelativePath(String);
 
 impl RelativePath {
     pub fn new(s: &str) -> Result<Self> {
-        let s = s.trim();
+        let s = s.trim().replace('\\', "/");
         if s.is_empty() {
             return Err(DomainError::InvalidData(
                 "RelativePath cannot be empty".into(),
@@ -194,7 +194,7 @@ impl RelativePath {
         if s.len() > 1024 {
             return Err(DomainError::InvalidData("RelativePath too long".into()));
         }
-        let path = Path::new(s);
+        let path = Path::new(&s);
         if path.is_absolute() {
             return Err(DomainError::InvalidData(
                 "Only repository-relative paths are allowed".into(),
@@ -208,7 +208,7 @@ impl RelativePath {
                 "Path must not contain parent directory segments".into(),
             ));
         }
-        Ok(Self(s.replace('\\', "/")))
+        Ok(Self(s))
     }
 
     pub fn as_str(&self) -> &str {
@@ -352,6 +352,7 @@ mod tests {
         assert!(RelativePath::new("/abs/path").is_err());
         assert!(RelativePath::new("..").is_err());
         assert!(RelativePath::new("tests/../foo").is_err());
+        assert!(RelativePath::new("a\\..\\b.rs").is_err());
         assert!(RelativePath::new("src/main.rs").is_ok());
         assert!(RelativePath::new("nested/deep/file.ts").is_ok());
     }

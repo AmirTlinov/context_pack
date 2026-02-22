@@ -54,8 +54,21 @@ where
     };
 
     if first == b'{' || first == b'[' {
-        let msg = read_json_message_from_first_byte(reader, first, max_frame_bytes).await?;
-        return Ok(msg.map(|m| (m, TransportMode::JsonLine)));
+        let line = read_line_from_first_byte(reader, first).await?;
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.len() > max_frame_bytes {
+            return Err(anyhow::anyhow!(
+                "message too large: {} bytes (max {})",
+                trimmed.len(),
+                max_frame_bytes
+            ));
+        }
+        if trimmed.trim().is_empty() {
+            return Ok(Some((String::new(), TransportMode::JsonLine)));
+        }
+        serde_json::from_str::<Value>(trimmed)
+            .map_err(|e| anyhow::anyhow!("invalid JSON message: {}", e))?;
+        return Ok(Some((trimmed.to_string(), TransportMode::JsonLine)));
     }
 
     let first_line = read_line_from_first_byte(reader, first).await?;
@@ -121,52 +134,6 @@ where
         return Ok(String::new());
     }
     Ok(String::from_utf8_lossy(&buf).into_owned())
-}
-
-fn parse_complete_json(buf: &[u8]) -> anyhow::Result<Option<usize>> {
-    match serde_json::from_slice::<Value>(buf) {
-        Ok(_) => Ok(Some(buf.len())),
-        Err(e) if e.is_eof() => Ok(None),
-        Err(e) => Err(anyhow::anyhow!("invalid JSON message: {}", e)),
-    }
-}
-
-async fn read_json_message_from_first_byte<R>(
-    reader: &mut BufReader<R>,
-    first: u8,
-    max_frame_bytes: usize,
-) -> anyhow::Result<Option<String>>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut payload = vec![first];
-    if payload.len() > max_frame_bytes {
-        return Err(anyhow::anyhow!(
-            "message too large: {} bytes (max {})",
-            payload.len(),
-            max_frame_bytes
-        ));
-    }
-
-    loop {
-        if parse_complete_json(&payload)?.is_some() {
-            return Ok(Some(String::from_utf8_lossy(&payload).into_owned()));
-        }
-
-        let mut chunk = [0u8; 4096];
-        let n = reader.read(&mut chunk).await?;
-        if n == 0 {
-            return Err(anyhow::anyhow!("invalid JSON message (unexpected EOF)"));
-        }
-        payload.extend_from_slice(&chunk[..n]);
-        if payload.len() > max_frame_bytes {
-            return Err(anyhow::anyhow!(
-                "message too large: {} bytes (max {})",
-                payload.len(),
-                max_frame_bytes
-            ));
-        }
-    }
 }
 
 pub(super) async fn write_response<W: tokio::io::AsyncWrite + Unpin>(

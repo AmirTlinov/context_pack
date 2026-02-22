@@ -55,6 +55,8 @@ CONTEXT_PACK_ROOT = "/absolute/path/to/context-pack-data"
 CONTEXT_PACK_SOURCE_ROOT = "__SESSION_CWD__"
 CONTEXT_PACK_LOG = "mcp_context_pack=info"
 CONTEXT_PACK_INITIALIZE_TIMEOUT_MS = "20000"
+CONTEXT_PACK_MAX_PACK_BYTES = "524288"
+CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 ```
 
 ### Generic `mcp.json`
@@ -69,7 +71,9 @@ CONTEXT_PACK_INITIALIZE_TIMEOUT_MS = "20000"
         "CONTEXT_PACK_ROOT": "/absolute/path/to/context-pack-data",
         "CONTEXT_PACK_SOURCE_ROOT": "__SESSION_CWD__",
         "CONTEXT_PACK_LOG": "mcp_context_pack=info",
-        "CONTEXT_PACK_INITIALIZE_TIMEOUT_MS": "20000"
+        "CONTEXT_PACK_INITIALIZE_TIMEOUT_MS": "20000",
+        "CONTEXT_PACK_MAX_PACK_BYTES": "524288",
+        "CONTEXT_PACK_MAX_SOURCE_BYTES": "2097152"
       }
     }
   }
@@ -82,12 +86,16 @@ CONTEXT_PACK_INITIALIZE_TIMEOUT_MS = "20000"
 |---|---|
 | `command` | Absolute path to server binary |
 | `args` | Optional CLI args (usually `[]`) |
-| `CONTEXT_PACK_ROOT` | Storage root (`{root}/packs/*.md`) |
+| `CONTEXT_PACK_ROOT` | Storage root (`{root}/packs/*.json`) |
 | `CONTEXT_PACK_SOURCE_ROOT` | Source root used to resolve anchors into code excerpts (`__SESSION_CWD__`, `session_cwd`, `cwd`, `.` = current session dir) |
 | `CONTEXT_PACK_LOG` | Log filter (stderr) |
 | `CONTEXT_PACK_INITIALIZE_TIMEOUT_MS` | Wait timeout for first MCP `initialize` |
+| `CONTEXT_PACK_MAX_PACK_BYTES` | Max bytes per stored pack file |
+| `CONTEXT_PACK_MAX_SOURCE_BYTES` | Max bytes per source file when rendering excerpts |
 
 > Recommendation: set `CONTEXT_PACK_ROOT` to a **root directory**, not to `.../packs`.
+>
+> Breaking note: storage format is JSON (`packs/*.json`). Legacy markdown packs are not supported.
 
 ---
 
@@ -175,6 +183,8 @@ CONTEXT_PACK_ROOT = "/absolute/path/to/context-pack-data"
 CONTEXT_PACK_SOURCE_ROOT = "__SESSION_CWD__"
 CONTEXT_PACK_LOG = "mcp_context_pack=info"
 CONTEXT_PACK_INITIALIZE_TIMEOUT_MS = "20000"
+CONTEXT_PACK_MAX_PACK_BYTES = "524288"
+CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 ```
 
 ### Универсальный `mcp.json`
@@ -189,7 +199,9 @@ CONTEXT_PACK_INITIALIZE_TIMEOUT_MS = "20000"
         "CONTEXT_PACK_ROOT": "/absolute/path/to/context-pack-data",
         "CONTEXT_PACK_SOURCE_ROOT": "__SESSION_CWD__",
         "CONTEXT_PACK_LOG": "mcp_context_pack=info",
-        "CONTEXT_PACK_INITIALIZE_TIMEOUT_MS": "20000"
+        "CONTEXT_PACK_INITIALIZE_TIMEOUT_MS": "20000",
+        "CONTEXT_PACK_MAX_PACK_BYTES": "524288",
+        "CONTEXT_PACK_MAX_SOURCE_BYTES": "2097152"
       }
     }
   }
@@ -202,12 +214,16 @@ CONTEXT_PACK_INITIALIZE_TIMEOUT_MS = "20000"
 |---|---|
 | `command` | Абсолютный путь к бинарнику сервера |
 | `args` | Опциональные аргументы CLI (обычно `[]`) |
-| `CONTEXT_PACK_ROOT` | Корень хранилища (`{root}/packs/*.md`) |
+| `CONTEXT_PACK_ROOT` | Корень хранилища (`{root}/packs/*.json`) |
 | `CONTEXT_PACK_SOURCE_ROOT` | Корень исходников для превращения якорей в вырезки (`__SESSION_CWD__`, `session_cwd`, `cwd`, `.` = текущая директория сессии) |
 | `CONTEXT_PACK_LOG` | Фильтр логов (stderr) |
 | `CONTEXT_PACK_INITIALIZE_TIMEOUT_MS` | Таймаут ожидания первого MCP `initialize` |
+| `CONTEXT_PACK_MAX_PACK_BYTES` | Максимальный размер файла пакета в байтах |
+| `CONTEXT_PACK_MAX_SOURCE_BYTES` | Максимальный размер исходного файла при рендеринге вырезок |
 
 > Рекомендация: задавайте `CONTEXT_PACK_ROOT` как **корневую папку**, не как `.../packs`.
+>
+> Важно: формат хранения — JSON (`packs/*.json`). Старые markdown-пакеты не поддерживаются.
 
 ---
 

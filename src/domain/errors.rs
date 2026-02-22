@@ -43,9 +43,3 @@ impl From<serde_json::Error> for DomainError {
         Self::Io(err.to_string())
     }
 }
-
-impl From<serde_yaml::Error> for DomainError {
-    fn from(err: serde_yaml::Error) -> Self {
-        Self::Io(err.to_string())
-    }
-}

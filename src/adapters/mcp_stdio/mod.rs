@@ -6,7 +6,6 @@ mod tool_output;
 mod transport;
 
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{BufReader, BufWriter};
 use tokio::time::Duration;
@@ -52,24 +51,38 @@ pub async fn start_mcp_server(
     let mut writer = BufWriter::new(stdout);
     let mut shutdown_requested = false;
     let init_timeout = initialize_timeout();
-    let initialized = Arc::new(AtomicBool::new(false));
+    let mut initialized = false;
+    let init_deadline = tokio::time::Instant::now() + init_timeout;
     let mut response_mode: Option<TransportMode> = None;
-    let mut init_watchdog = Some({
-        let initialized = initialized.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(init_timeout).await;
-            if !initialized.load(Ordering::SeqCst) {
-                tracing::warn!(
-                    "no initialize received within {:?}; closing server",
-                    init_timeout
-                );
-                std::process::exit(0);
-            }
-        })
-    });
 
     loop {
-        let (raw, mode) = match read_next_message(&mut reader, MAX_FRAME_BYTES).await {
+        let read_result = if initialized {
+            read_next_message(&mut reader, MAX_FRAME_BYTES).await
+        } else {
+            let now = tokio::time::Instant::now();
+            if now >= init_deadline {
+                return Err(anyhow::anyhow!(
+                    "no initialize received within {:?}; closing server",
+                    init_timeout
+                ));
+            }
+            match tokio::time::timeout(
+                init_deadline.saturating_duration_since(now),
+                read_next_message(&mut reader, MAX_FRAME_BYTES),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    return Err(anyhow::anyhow!(
+                        "no initialize received within {:?}; closing server",
+                        init_timeout
+                    ));
+                }
+            }
+        };
+
+        let (raw, mode) = match read_result {
             Ok(Some(msg)) => msg,
             Ok(None) => break, // EOF
             Err(e) => {
@@ -95,10 +108,8 @@ pub async fn start_mcp_server(
             }
         };
 
-        if req.method == "initialize" && !initialized.swap(true, Ordering::SeqCst) {
-            if let Some(handle) = init_watchdog.take() {
-                handle.abort();
-            }
+        if req.method == "initialize" && !initialized {
+            initialized = true;
         }
 
         let request_id = req.id.clone().unwrap_or(Value::Null);
@@ -135,10 +146,6 @@ pub async fn start_mcp_server(
         if let Some(envelope) = handle_request(&req, &input_uc, &output_uc).await {
             write_response(&mut writer, &envelope, response_mode.unwrap_or(mode)).await?;
         }
-    }
-
-    if let Some(handle) = init_watchdog.take() {
-        handle.abort();
     }
 
     Ok(())
@@ -227,10 +234,18 @@ pub(super) fn tool_success(action: &str, payload: Value) -> Result<Value, Domain
         "action": action,
         "payload": payload
     });
+    let text = serde_json::to_string(&content)?;
+    if text.len() > MAX_FRAME_BYTES {
+        return Err(DomainError::InvalidData(format!(
+            "tool output too large: {} bytes (max {})",
+            text.len(),
+            MAX_FRAME_BYTES
+        )));
+    }
     Ok(json!({
         "content": [{
             "type": "text",
-            "text": serde_json::to_string(&content)?
+            "text": text
         }]
     }))
 }
@@ -405,11 +420,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_plain_multiline_json_is_accepted() {
+    async fn test_plain_multiline_json_is_rejected() {
         let input = b"{\n\"jsonrpc\":\"2.0\",\n\"method\":\"ping\"\n}\n";
-        let msg = parse_msg(input).await.unwrap().unwrap();
-        let parsed: Value = serde_json::from_str(&msg).unwrap();
-        assert_eq!(parsed["method"], "ping");
+        let err = parse_msg(input).await.unwrap_err();
+        assert!(err.to_string().contains("invalid JSON message"), "{}", err);
+    }
+
+    #[tokio::test]
+    async fn test_json_line_batch_messages_are_parsed_sequentially() {
+        let input = b"{\"jsonrpc\":\"2.0\",\"id\":1}\n{\"jsonrpc\":\"2.0\",\"id\":2}\n";
+        let mut reader = BufReader::new(input.as_slice());
+
+        let first = read_next_message(&mut reader, MAX_FRAME_BYTES)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = read_next_message(&mut reader, MAX_FRAME_BYTES)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let first_json: Value = serde_json::from_str(&first.0).unwrap();
+        let second_json: Value = serde_json::from_str(&second.0).unwrap();
+        assert_eq!(first_json["id"], 1);
+        assert_eq!(second_json["id"], 2);
+        assert_eq!(first.1, TransportMode::JsonLine);
+        assert_eq!(second.1, TransportMode::JsonLine);
     }
 
     #[tokio::test]
@@ -523,6 +559,14 @@ mod tests {
         let err =
             crate::adapters::mcp_stdio::tool_output::reject_output_format_param(&args).unwrap_err();
         assert!(matches!(err, DomainError::InvalidData(_)));
+    }
+
+    #[test]
+    fn test_tool_success_rejects_oversized_payload() {
+        let huge = "x".repeat(MAX_FRAME_BYTES + 1);
+        let err = tool_success("get", json!({ "blob": huge })).unwrap_err();
+        assert!(matches!(err, DomainError::InvalidData(_)));
+        assert!(err.to_string().contains("tool output too large"));
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 use mcp_context_pack::{
-    adapters::{code_excerpt_fs::CodeExcerptFsAdapter, storage_markdown::MarkdownStorageAdapter},
+    adapters::{code_excerpt_fs::CodeExcerptFsAdapter, storage_json::JsonStorageAdapter},
     app::{
         input_usecases::{InputUseCases, TouchTtlMode, UpsertRefRequest},
         output_usecases::OutputUseCases,
@@ -16,8 +16,8 @@ fn build_services(
     storage_dir: PathBuf,
     source_root: PathBuf,
 ) -> (Arc<InputUseCases>, Arc<OutputUseCases>) {
-    let storage = Arc::new(MarkdownStorageAdapter::new(storage_dir));
-    let excerpts = Arc::new(CodeExcerptFsAdapter::new(source_root.clone()));
+    let storage = Arc::new(JsonStorageAdapter::new(storage_dir));
+    let excerpts = Arc::new(CodeExcerptFsAdapter::new(source_root.clone()).unwrap());
     let input_uc = Arc::new(InputUseCases::new(storage.clone(), excerpts.clone()));
     let output_uc = Arc::new(OutputUseCases::new(storage, excerpts));
     (input_uc, output_uc)
@@ -289,14 +289,14 @@ async fn test_revision_increments() {
 }
 
 #[tokio::test]
-async fn test_yaml_round_trip() {
+async fn test_json_round_trip() {
     let tmp = tempdir().unwrap();
     let (input_uc, _) = build_services(tmp.path().join("packs"), tmp.path().to_path_buf());
 
     let pack = input_uc
         .create_with_tags_ttl(
-            Some("yaml-pack".into()),
-            Some("Yaml Pack".into()),
+            Some("json-pack".into()),
+            Some("Json Pack".into()),
             Some("brief text".into()),
             None,
             30,
@@ -328,7 +328,7 @@ async fn test_yaml_round_trip() {
 
     // Re-fetch from disk
     let loaded = input_uc.get(&id).await.unwrap();
-    assert_eq!(loaded.title.as_deref(), Some("Yaml Pack"));
+    assert_eq!(loaded.title.as_deref(), Some("Json Pack"));
     assert_eq!(loaded.tags, vec!["tag1", "tag2"]);
     assert_eq!(loaded.sections.len(), 1);
     assert_eq!(loaded.sections[0].description.as_deref(), Some("desc"));
@@ -549,7 +549,7 @@ async fn test_malformed_pack_file_fails_closed() {
     let tmp = tempdir().unwrap();
     let storage_dir = tmp.path().join("packs");
     std::fs::create_dir_all(&storage_dir).unwrap();
-    std::fs::write(storage_dir.join("pk_aaaaaaaa.md"), "not-frontmatter").unwrap();
+    std::fs::write(storage_dir.join("pk_aaaaaaaa.json"), "not-json").unwrap();
 
     let (input_uc, _) = build_services(storage_dir, tmp.path().to_path_buf());
     let listed = input_uc.list(None, None, None, None).await;
@@ -562,22 +562,8 @@ async fn test_schema_mismatch_returns_migration_required() {
     let storage_dir = tmp.path().join("packs");
     std::fs::create_dir_all(&storage_dir).unwrap();
     std::fs::write(
-        storage_dir.join("pk_aaaaaaaa.md"),
-        r#"---
-schema_version: 1
-id: pk_aaaaaaaa
-name: old-pack
-title: null
-brief: null
-status: draft
-tags: []
-sections: []
-revision: 1
-created_at: 2026-01-01T00:00:00Z
-updated_at: 2026-01-01T00:00:00Z
-expires_at: 2099-01-01T00:00:00Z
----
-"#,
+        storage_dir.join("pk_aaaaaaaa.json"),
+        r#"{"schema_version":1,"id":"pk_aaaaaaaa","name":"old-pack","title":null,"brief":null,"status":"draft","tags":[],"sections":[],"revision":1,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","expires_at":"2099-01-01T00:00:00Z"}"#,
     )
     .unwrap();
 
@@ -597,16 +583,13 @@ async fn test_expired_pack_is_not_visible_immediately_in_list() {
         .await
         .unwrap();
     let pack_id = pack.id.as_str().to_string();
-    let path = storage_dir.join(format!("{}.md", pack_id));
+    let path = storage_dir.join(format!("{}.json", pack_id));
 
     let raw = std::fs::read_to_string(&path).unwrap();
-    let after_first = raw.strip_prefix("---\n").unwrap();
-    let end = after_first.find("\n---").unwrap();
-    let yaml = &after_first[..end];
-    let mut data: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-    data["expires_at"] = serde_yaml::Value::String("2000-01-01T00:00:00Z".into());
-    let new_yaml = serde_yaml::to_string(&data).unwrap();
-    std::fs::write(path, format!("---\n{}---\n", new_yaml)).unwrap();
+    let mut data: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    data["expires_at"] = serde_json::Value::String("2000-01-01T00:00:00Z".into());
+    let new_json = serde_json::to_string(&data).unwrap();
+    std::fs::write(path, new_json).unwrap();
 
     let listed = input_uc.list(None, None, None, None).await.unwrap();
     assert!(

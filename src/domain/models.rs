@@ -537,10 +537,10 @@ mod tests {
         let mut pack = make_pack();
         pack.id = PackId::parse("pk_abcdef23").unwrap();
         // force invalid id without parse API
-        let raw = serde_yaml::to_string(&pack)
+        let raw = serde_json::to_string(&pack)
             .unwrap()
             .replace("pk_abcdef23", "invalid-id");
-        let parsed: Pack = serde_yaml::from_str(&raw).unwrap();
+        let parsed: Pack = serde_json::from_str(&raw).unwrap();
         assert!(parsed.migrate_schema().is_err());
     }
 

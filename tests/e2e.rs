@@ -969,6 +969,65 @@ async fn e2e_initialize_accepts_unframed_json_message() -> Result<()> {
 }
 
 #[tokio::test]
+async fn e2e_unframed_json_line_batch_is_processed_sequentially() -> Result<()> {
+    let dir = tempdir()?;
+    let storage_root = dir.path().join("storage");
+    let source_root = dir.path().join("source");
+    tokio::fs::create_dir_all(&storage_root).await?;
+    tokio::fs::create_dir_all(&source_root).await?;
+
+    let bin_path = resolve_binary_path()?;
+    let mut child = Command::new(bin_path)
+        .env("CONTEXT_PACK_ROOT", &storage_root)
+        .env("CONTEXT_PACK_SOURCE_ROOT", &source_root)
+        .env("CONTEXT_PACK_LOG", "off")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("spawn MCP server")?;
+
+    let mut stdin = tokio::io::BufWriter::new(
+        child
+            .stdin
+            .take()
+            .context("missing piped stdin for spawned server")?,
+    );
+    let mut stdout = BufReader::new(
+        child
+            .stdout
+            .take()
+            .context("missing piped stdout for spawned server")?,
+    );
+
+    stdin
+        .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+        .await?;
+    stdin.write_all(b"\n").await?;
+    stdin.flush().await?;
+
+    let init = read_mcp_response(&mut stdout).await?;
+    assert_eq!(init["id"], 1);
+
+    stdin
+        .write_all(
+            br#"{"jsonrpc":"2.0","id":2,"method":"ping"}
+{"jsonrpc":"2.0","id":3,"method":"ping"}
+"#,
+        )
+        .await?;
+    stdin.flush().await?;
+
+    let ping1 = read_mcp_response(&mut stdout).await?;
+    let ping2 = read_mcp_response(&mut stdout).await?;
+    assert_eq!(ping1["id"], 2);
+    assert_eq!(ping2["id"], 3);
+
+    child.kill().await.ok();
+    child.wait().await.context("wait for server exit")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn e2e_server_exits_if_initialize_never_arrives() -> Result<()> {
     let dir = tempdir()?;
     let storage_root = dir.path().join("storage");
@@ -987,10 +1046,12 @@ async fn e2e_server_exits_if_initialize_never_arrives() -> Result<()> {
         .spawn()
         .context("spawn MCP server")?;
 
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-    let status = child.try_wait().context("query child status")?;
+    let status = tokio::time::timeout(std::time::Duration::from_secs(3), child.wait())
+        .await
+        .context("wait timeout for child exit")?
+        .context("wait for child status")?;
     assert!(
-        status.is_some(),
+        status.code().is_some(),
         "server must exit if initialize is not received within timeout"
     );
     Ok(())
@@ -1076,22 +1137,8 @@ async fn e2e_schema_mismatch_reports_migration_required() -> Result<()> {
     tokio::fs::create_dir_all(&source_root).await?;
 
     tokio::fs::write(
-        storage_root.join("packs").join("pk_aaaaaaaa.md"),
-        r#"---
-schema_version: 1
-id: pk_aaaaaaaa
-name: old-pack
-title: null
-brief: null
-status: draft
-tags: []
-sections: []
-revision: 1
-created_at: 2026-01-01T00:00:00Z
-updated_at: 2026-01-01T00:00:00Z
-expires_at: 2099-01-01T00:00:00Z
----
-"#,
+        storage_root.join("packs").join("pk_aaaaaaaa.json"),
+        r#"{"schema_version":1,"id":"pk_aaaaaaaa","name":"old-pack","title":null,"brief":null,"status":"draft","tags":[],"sections":[],"revision":1,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","expires_at":"2099-01-01T00:00:00Z"}"#,
     )
     .await?;
 
