@@ -1,3 +1,4 @@
+use std::fmt::Write as FmtWrite;
 use std::sync::Arc;
 
 use crate::{
@@ -69,7 +70,7 @@ impl OutputUseCases {
     }
 
     async fn render_pack(&self, pack: &Pack) -> Result<String> {
-        let mut out = String::new();
+        let mut out = String::with_capacity(2048);
 
         // ── [LEGEND] ──────────────────────────────────────────────────────────
         out.push_str("[LEGEND]\n");
@@ -78,57 +79,58 @@ impl OutputUseCases {
             .as_deref()
             .or(pack.name.as_ref().map(|n| n.as_str()))
             .unwrap_or("Untitled");
-        out.push_str(&format!("# Context pack: {}\n\n", title));
-        out.push_str(&format!("- id: {}\n", pack.id));
+        let _ = write!(out, "# Context pack: {}\n\n", title);
+        let _ = writeln!(out, "- id: {}", pack.id);
         if let Some(name) = &pack.name {
-            out.push_str(&format!("- name: {}\n", name));
+            let _ = writeln!(out, "- name: {}", name);
         }
-        out.push_str(&format!("- status: {}\n", pack.status));
-        out.push_str(&format!("- revision: {}\n", pack.revision));
-        out.push_str(&format!("- expires_at: {}\n", pack.expires_at.to_rfc3339()));
-        out.push_str(&format!(
-            "- ttl_remaining: {}\n",
+        let _ = writeln!(out, "- status: {}", pack.status);
+        let _ = writeln!(out, "- revision: {}", pack.revision);
+        let _ = writeln!(out, "- expires_at: {}", pack.expires_at.to_rfc3339());
+        let _ = writeln!(
+            out,
+            "- ttl_remaining: {}",
             pack.ttl_remaining_human(chrono::Utc::now())
-        ));
+        );
         if !pack.tags.is_empty() {
-            out.push_str(&format!("- tags: {}\n", pack.tags.join(", ")));
+            let _ = writeln!(out, "- tags: {}", pack.tags.join(", "));
         }
         if let Some(brief) = &pack.brief {
-            out.push_str(&format!("- brief: {}\n", brief));
+            let _ = writeln!(out, "- brief: {}", brief);
         }
 
         // ── [CONTENT] ─────────────────────────────────────────────────────────
         out.push_str("\n[CONTENT]\n");
 
         for section in &pack.sections {
-            out.push_str(&format!("\n## {} [{}]\n", section.title, section.key));
+            let _ = write!(out, "\n## {} [{}]\n", section.title, section.key);
             if let Some(desc) = &section.description {
-                out.push_str(&format!("\n{}\n", desc));
+                let _ = write!(out, "\n{}\n", desc);
             }
 
             // refs grouped by `group`
             let groups = Pack::refs_grouped_in_section(section);
             for (group_name, refs) in &groups {
-                out.push_str(&format!("\n### group: {}\n", group_name));
+                let _ = write!(out, "\n### group: {}\n", group_name);
                 for r in refs {
-                    out.push_str(&format!("\n#### {} [{}]\n", r.key, section.key));
+                    let _ = write!(out, "\n#### {} [{}]\n", r.key, section.key);
                     if let Some(t) = &r.title {
-                        out.push_str(&format!("**{}**\n\n", t));
+                        let _ = write!(out, "**{}**\n\n", t);
                     }
-                    out.push_str(&format!("- path: {}\n", r.path));
-                    out.push_str(&format!("- lines: {}-{}\n", r.lines.start, r.lines.end));
+                    let _ = writeln!(out, "- path: {}", r.path);
+                    let _ = writeln!(out, "- lines: {}-{}", r.lines.start, r.lines.end);
                     if let Some(why) = &r.why {
-                        out.push_str(&format!("- why: {}\n", why));
+                        let _ = writeln!(out, "- why: {}", why);
                     }
 
                     // fetch actual code excerpt
                     match self.excerpt.read_lines(&r.path, r.lines).await {
                         Ok(snippet) => {
                             let lang = lang_from_path(r.path.as_str());
-                            out.push_str(&format!("\n```{}\n{}\n```\n", lang, snippet.body));
+                            let _ = write!(out, "\n```{}\n{}\n```\n", lang, snippet.body);
                         }
                         Err(DomainError::StaleRef(msg)) => {
-                            out.push_str(&format!("\n> stale ref: {}\n", msg));
+                            let _ = write!(out, "\n> stale ref: {}\n", msg);
                         }
                         Err(e) => return Err(e),
                     }
@@ -139,11 +141,11 @@ impl OutputUseCases {
             if !section.diagrams.is_empty() {
                 out.push_str("\n### Diagrams\n");
                 for d in &section.diagrams {
-                    out.push_str(&format!("\n#### {}\n", d.title));
+                    let _ = write!(out, "\n#### {}\n", d.title);
                     if let Some(why) = &d.why {
-                        out.push_str(&format!("_{}_\n\n", why));
+                        let _ = write!(out, "_{}_\n\n", why);
                     }
-                    out.push_str(&format!("```mermaid\n{}\n```\n", d.mermaid));
+                    let _ = write!(out, "```mermaid\n{}\n```\n", d.mermaid);
                 }
             }
         }
