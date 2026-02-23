@@ -66,6 +66,10 @@ impl PackRepositoryPort for FakePackRepo {
         Ok(self.0.lock().unwrap().values().cloned().collect())
     }
 
+    async fn delete_pack_file(&self, id: &PackId) -> Result<bool> {
+        Ok(self.0.lock().unwrap().remove(id.as_str()).is_some())
+    }
+
     async fn purge_expired(&self) -> Result<()> {
         Ok(())
     }
