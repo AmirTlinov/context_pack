@@ -96,10 +96,11 @@ impl JsonStorageAdapter {
         )
     }
 
-    fn remove_corrupt_pack_file(path: &Path, err: &DomainError) {
+    fn remove_corrupt_pack_file(path: &Path, err: &DomainError, stage: &str) {
         tracing::warn!(
-            "removing unreadable pack '{}' during read: {}",
+            "removing unreadable pack '{}' during {}: {}",
             path.display(),
+            stage,
             err
         );
         match std::fs::remove_file(path) {
@@ -118,7 +119,7 @@ impl JsonStorageAdapter {
         match Self::read_pack_from_path(path, max_pack_bytes) {
             Ok(pack) => Ok(Some(pack)),
             Err(err) if Self::is_recoverable_pack_read_error(&err) => {
-                Self::remove_corrupt_pack_file(path, &err);
+                Self::remove_corrupt_pack_file(path, &err, "read");
                 Ok(None)
             }
             Err(err) => Err(err),
@@ -208,13 +209,41 @@ impl JsonStorageAdapter {
     fn read_pack_meta_from_path(path: &Path, max_pack_bytes: usize) -> Option<PackMeta> {
         let file_len = usize::try_from(std::fs::metadata(path).ok()?.len()).unwrap_or(usize::MAX);
         if file_len > max_pack_bytes {
+            Self::remove_corrupt_pack_file(
+                path,
+                &DomainError::Io(format!(
+                    "pack file '{}' is too large: {} bytes (max {})",
+                    path.display(),
+                    file_len,
+                    max_pack_bytes
+                )),
+                "purge",
+            );
             return None;
         }
-        let raw = std::fs::read_to_string(path).ok()?;
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                Self::remove_corrupt_pack_file(
+                    path,
+                    &DomainError::Io(format!(
+                        "failed to read pack file '{}': {}",
+                        path.display(),
+                        err
+                    )),
+                    "purge",
+                );
+                return None;
+            }
+        };
         serde_json::from_str::<PackMeta>(&raw).ok().or_else(|| {
-            tracing::warn!(
-                "failed to parse PackMeta from '{}', file will not be purged",
-                path.display()
+            Self::remove_corrupt_pack_file(
+                path,
+                &DomainError::InvalidData(format!(
+                    "failed to parse pack metadata from '{}'",
+                    path.display()
+                )),
+                "purge",
             );
             None
         })
@@ -691,6 +720,53 @@ mod tests {
                 .join(format!("{}.json", expired.id.as_str()))
                 .exists(),
             "expired pack should have been removed"
+        );
+    }
+
+    #[test]
+    fn test_purge_expired_removes_unreadable_and_oversized_pack_files() {
+        let dir = tempdir().unwrap();
+        let max = 1024usize;
+
+        let active = make_pack();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &active, max).unwrap();
+        let active_path = dir.path().join(format!("{}.json", active.id.as_str()));
+
+        let corrupted_path = dir.path().join("pk_corrupt.json");
+        std::fs::write(&corrupted_path, "not-json").unwrap();
+
+        let oversized = oversized_pack_by_growth(max);
+        let oversized_path = dir.path().join(format!("{}.json", oversized.id.as_str()));
+        let oversized_payload = JsonStorageAdapter::encode(&oversized).unwrap();
+        assert!(
+            oversized_payload.len() > max,
+            "oversized payload must exceed max"
+        );
+        std::fs::write(&oversized_path, oversized_payload).unwrap();
+
+        assert!(
+            active_path.exists(),
+            "active pack should exist before purge"
+        );
+        assert!(
+            corrupted_path.exists(),
+            "corrupt pack should exist before purge"
+        );
+        assert!(
+            oversized_path.exists(),
+            "oversized pack should exist before purge"
+        );
+
+        JsonStorageAdapter::purge_expired_sync(dir.path(), max).unwrap();
+
+        assert!(active_path.exists(), "active pack should remain");
+        assert!(
+            !corrupted_path.exists(),
+            "corrupt pack should be removed by purge"
+        );
+        assert!(
+            !oversized_path.exists(),
+            "oversized pack should be removed by purge"
         );
     }
 
