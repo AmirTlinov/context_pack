@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::tempdir;
 
+use chrono::{Duration, Utc};
 use mcp_context_pack::{
     adapters::{code_excerpt_fs::CodeExcerptFsAdapter, storage_json::JsonStorageAdapter},
     app::{
@@ -32,6 +33,31 @@ fn oversized_pack_for_limit(id: PackId, max_bytes: usize) -> Pack {
     );
     pack.brief = Some("x".repeat(max_bytes + 1));
     pack
+}
+
+fn make_named_pack_with(
+    name: &str,
+    status: Status,
+    updated_at: chrono::DateTime<Utc>,
+    revision: u64,
+) -> Pack {
+    let mut pack = Pack::new(PackId::new(), Some(PackName::new(name).unwrap()));
+    pack.status = status;
+    pack.updated_at = updated_at;
+    pack.created_at = updated_at - Duration::minutes(1);
+    pack.revision = revision.max(1);
+    pack.expires_at = updated_at + Duration::hours(24);
+    pack
+}
+
+fn write_pack_file(storage_dir: &std::path::Path, pack: &Pack) {
+    std::fs::create_dir_all(storage_dir).unwrap();
+    let payload = serde_json::to_string(pack).unwrap();
+    std::fs::write(
+        storage_dir.join(format!("{}.json", pack.id.as_str())),
+        payload,
+    )
+    .unwrap();
 }
 
 #[tokio::test]
@@ -256,6 +282,89 @@ async fn test_list_pagination() {
 
     let page = input_uc.list(None, None, Some(2), Some(1)).await.unwrap();
     assert_eq!(page.len(), 2, "limit=2 offset=1 should give 2 items");
+}
+
+#[tokio::test]
+async fn test_name_resolution_is_deterministic_and_prefers_finalized() {
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("packs");
+    let source_root = tmp.path().join("src");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::write(source_root.join("ctx.rs"), "fn stable() {}\n").unwrap();
+
+    let (input_uc, output_uc) = build_services(storage_dir.clone(), tmp.path().to_path_buf());
+    let now = Utc::now();
+
+    let selected = make_named_pack_with("det-name", Status::Finalized, now, 8);
+    let older_finalized = make_named_pack_with(
+        "det-name",
+        Status::Finalized,
+        now - Duration::minutes(10),
+        10,
+    );
+    let newer_draft =
+        make_named_pack_with("det-name", Status::Draft, now + Duration::minutes(1), 99);
+
+    write_pack_file(&storage_dir, &selected);
+    write_pack_file(&storage_dir, &older_finalized);
+    write_pack_file(&storage_dir, &newer_draft);
+
+    let first = input_uc.get("det-name").await.unwrap();
+    let second = input_uc.get("det-name").await.unwrap();
+    assert_eq!(
+        first.id, selected.id,
+        "lookup must prefer latest finalized candidate"
+    );
+    assert_eq!(
+        second.id, selected.id,
+        "same input must resolve to the same pack under unchanged state"
+    );
+
+    let rendered = output_uc.get_rendered("det-name", None).await.unwrap();
+    assert_eq!(
+        legend_value(&rendered, "id").as_deref(),
+        Some(selected.id.as_str()),
+        "output rendering by name should resolve to deterministic winner"
+    );
+}
+
+#[tokio::test]
+async fn test_name_resolution_ambiguity_exposes_candidate_ids() {
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("packs");
+    let source_root = tmp.path().join("src");
+    std::fs::create_dir_all(&source_root).unwrap();
+
+    let (input_uc, output_uc) = build_services(storage_dir.clone(), tmp.path().to_path_buf());
+    let shared_time = Utc::now();
+    let candidate_a = make_named_pack_with("ambig-name", Status::Finalized, shared_time, 11);
+    let candidate_b = make_named_pack_with("ambig-name", Status::Finalized, shared_time, 11);
+
+    write_pack_file(&storage_dir, &candidate_a);
+    write_pack_file(&storage_dir, &candidate_b);
+
+    let input_err = input_uc.get("ambig-name").await.unwrap_err();
+    match input_err {
+        DomainError::Ambiguous { mut candidates, .. } => {
+            candidates.sort();
+            let mut expected = vec![
+                candidate_a.id.as_str().to_string(),
+                candidate_b.id.as_str().to_string(),
+            ];
+            expected.sort();
+            assert_eq!(candidates, expected);
+        }
+        other => panic!("expected DomainError::Ambiguous, got: {:?}", other),
+    }
+
+    let output_err = output_uc
+        .get_rendered("ambig-name", None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(output_err, DomainError::Ambiguous { .. }),
+        "output lookup must fail closed on ambiguity"
+    );
 }
 
 #[tokio::test]

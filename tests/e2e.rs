@@ -1,4 +1,9 @@
 use anyhow::{Context, Result};
+use chrono::{Duration, Utc};
+use mcp_context_pack::domain::{
+    models::Pack,
+    types::{PackId, PackName, Status},
+};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Stdio;
@@ -225,6 +230,32 @@ fn rendered_ref_keys(markdown: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn make_named_pack_with(
+    name: &str,
+    status: Status,
+    updated_at: chrono::DateTime<Utc>,
+    revision: u64,
+) -> Pack {
+    let mut pack = Pack::new(PackId::new(), Some(PackName::new(name).unwrap()));
+    pack.status = status;
+    pack.updated_at = updated_at;
+    pack.created_at = updated_at - Duration::minutes(1);
+    pack.revision = revision.max(1);
+    pack.expires_at = updated_at + Duration::hours(24);
+    pack
+}
+
+fn write_pack_file(storage_root: &Path, pack: &Pack) -> Result<()> {
+    let packs_dir = storage_root.join("packs");
+    std::fs::create_dir_all(&packs_dir)?;
+    let payload = serde_json::to_string(pack)?;
+    std::fs::write(
+        packs_dir.join(format!("{}.json", pack.id.as_str())),
+        payload,
+    )?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -1514,6 +1545,145 @@ async fn e2e_schema_mismatch_reports_migration_required() -> Result<()> {
         let err_payload = parse_tool_payload(&response)?;
         assert_eq!(err_payload["kind"], "migration_required");
         assert_eq!(err_payload["code"], "migration_required");
+        Ok(())
+    }
+    .await;
+
+    client.stop().await?;
+    result
+}
+
+#[tokio::test]
+async fn e2e_output_get_name_resolution_metadata_and_ambiguity_candidates() -> Result<()> {
+    let dir = tempdir()?;
+    let storage_root = dir.path().join("storage");
+    let source_root = dir.path().join("source");
+    tokio::fs::create_dir_all(&storage_root).await?;
+    tokio::fs::create_dir_all(&source_root).await?;
+
+    let now = Utc::now();
+    let selected = make_named_pack_with("name-resolve-pack", Status::Finalized, now, 12);
+    let older_finalized = make_named_pack_with(
+        "name-resolve-pack",
+        Status::Finalized,
+        now - Duration::minutes(15),
+        4,
+    );
+    let newer_draft = make_named_pack_with(
+        "name-resolve-pack",
+        Status::Draft,
+        now + Duration::minutes(1),
+        100,
+    );
+
+    let tie_time = now + Duration::minutes(5);
+    let ambiguous_a = make_named_pack_with("ambiguous-e2e-pack", Status::Finalized, tie_time, 9);
+    let ambiguous_b = make_named_pack_with("ambiguous-e2e-pack", Status::Finalized, tie_time, 9);
+
+    write_pack_file(&storage_root, &selected)?;
+    write_pack_file(&storage_root, &older_finalized)?;
+    write_pack_file(&storage_root, &newer_draft)?;
+    write_pack_file(&storage_root, &ambiguous_a)?;
+    write_pack_file(&storage_root, &ambiguous_b)?;
+
+    let mut client = McpE2EClient::spawn(&storage_root, &source_root).await?;
+
+    let result: Result<()> = async {
+        let _ = client
+            .call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .await?;
+
+        let by_name = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"get",
+                        "name":"name-resolve-pack"
+                    }
+                }
+            }))
+            .await?;
+        let markdown_name = output_markdown(&by_name)?;
+        assert_eq!(
+            legend_value(markdown_name, "id").as_deref(),
+            Some(selected.id.as_str())
+        );
+        assert_eq!(
+            legend_value(markdown_name, "selected_by").as_deref(),
+            Some("name_latest_finalized_updated_at_then_revision")
+        );
+        assert_eq!(
+            legend_value(markdown_name, "selected_revision").as_deref(),
+            Some("12")
+        );
+        assert_eq!(
+            legend_value(markdown_name, "selected_status").as_deref(),
+            Some("finalized")
+        );
+
+        let by_id = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":3,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"get",
+                        "id": selected.id.as_str()
+                    }
+                }
+            }))
+            .await?;
+        let markdown_id = output_markdown(&by_id)?;
+        assert_eq!(
+            legend_value(markdown_id, "selected_by").as_deref(),
+            Some("exact_id")
+        );
+        assert_eq!(
+            legend_value(markdown_id, "selected_revision").as_deref(),
+            Some("12")
+        );
+        assert_eq!(
+            legend_value(markdown_id, "selected_status").as_deref(),
+            Some("finalized")
+        );
+
+        let ambiguous = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":4,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"get",
+                        "name":"ambiguous-e2e-pack"
+                    }
+                }
+            }))
+            .await?;
+        assert_eq!(ambiguous["result"]["isError"], true);
+        let err_payload = parse_tool_payload(&ambiguous)?;
+        assert_eq!(err_payload["code"], "ambiguous");
+        let mut actual_candidates = err_payload["details"]["candidate_ids"]
+            .as_array()
+            .context("missing candidate_ids details")?
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        actual_candidates.sort();
+        let mut expected_candidates = vec![
+            ambiguous_a.id.as_str().to_string(),
+            ambiguous_b.id.as_str().to_string(),
+        ];
+        expected_candidates.sort();
+        assert_eq!(actual_candidates, expected_candidates);
         Ok(())
     }
     .await;

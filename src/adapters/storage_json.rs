@@ -11,7 +11,7 @@ use crate::{
     domain::{
         errors::{DomainError, Result},
         models::Pack,
-        types::{PackId, PackName},
+        types::{PackId, PackName, Status},
     },
 };
 
@@ -299,8 +299,95 @@ impl JsonStorageAdapter {
                 packs.push(pack);
             }
         }
-        packs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        packs.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| b.revision.cmp(&a.revision))
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
         Ok(packs)
+    }
+
+    fn candidate_ids(candidates: &[Pack]) -> Vec<String> {
+        let mut ids = candidates
+            .iter()
+            .map(|pack| pack.id.as_str().to_string())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    fn ambiguous_name_resolution(
+        name: &PackName,
+        reason: impl Into<String>,
+        candidates: &[Pack],
+    ) -> DomainError {
+        let candidate_ids = Self::candidate_ids(candidates);
+        let candidate_preview = candidate_ids.join(", ");
+        DomainError::Ambiguous {
+            message: format!(
+                "multiple packs found for name '{}': {} (candidates: [{}])",
+                name,
+                reason.into(),
+                candidate_preview
+            ),
+            candidates: candidate_ids,
+        }
+    }
+
+    fn select_pack_by_name(name: &PackName, candidates: Vec<Pack>) -> Result<Option<Pack>> {
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        let preferred_status = if candidates
+            .iter()
+            .any(|candidate| candidate.status == Status::Finalized)
+        {
+            Status::Finalized
+        } else {
+            Status::Draft
+        };
+
+        let mut scoped = candidates
+            .into_iter()
+            .filter(|candidate| candidate.status == preferred_status)
+            .collect::<Vec<_>>();
+        if scoped.is_empty() {
+            return Ok(None);
+        }
+
+        let latest_updated_at = scoped
+            .iter()
+            .map(|candidate| candidate.updated_at)
+            .max()
+            .expect("scoped candidates are non-empty");
+        scoped.retain(|candidate| candidate.updated_at == latest_updated_at);
+        if scoped.len() == 1 {
+            return Ok(scoped.pop());
+        }
+
+        let latest_revision = scoped
+            .iter()
+            .map(|candidate| candidate.revision)
+            .max()
+            .expect("scoped candidates are non-empty");
+        scoped.retain(|candidate| candidate.revision == latest_revision);
+        if scoped.len() == 1 {
+            return Ok(scoped.pop());
+        }
+
+        Err(Self::ambiguous_name_resolution(
+            name,
+            format!(
+                "cannot break tie after status='{}', updated_at='{}', revision='{}'",
+                preferred_status,
+                latest_updated_at.to_rfc3339(),
+                latest_revision
+            ),
+            &scoped,
+        ))
     }
 
     async fn purge_expired_locked(&self) -> Result<()> {
@@ -524,18 +611,11 @@ impl PackRepositoryPort for JsonStorageAdapter {
         let max_pack_bytes = self.max_pack_bytes;
         let name = name.clone();
         task::spawn_blocking(move || -> Result<Option<Pack>> {
-            let mut matches = Self::load_all_active_sync(&storage_dir, max_pack_bytes)?
+            let matches = Self::load_all_active_sync(&storage_dir, max_pack_bytes)?
                 .into_iter()
                 .filter(|pack| pack.name.as_ref() == Some(&name))
                 .collect::<Vec<_>>();
-            match matches.len() {
-                0 => Ok(None),
-                1 => Ok(matches.pop()),
-                _ => Err(DomainError::Ambiguous(format!(
-                    "multiple packs found for name '{}'",
-                    name
-                ))),
-            }
+            Self::select_pack_by_name(&name, matches)
         })
         .await
         .map_err(|e| DomainError::Io(format!("task execution failed: {}", e)))?
@@ -593,8 +673,8 @@ impl PackRepositoryPort for JsonStorageAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::types::{PackId, PackName};
-    use chrono::Duration;
+    use crate::domain::types::{PackId, PackName, Status};
+    use chrono::{Duration, Utc};
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -618,6 +698,21 @@ mod tests {
             payload_len = JsonStorageAdapter::encode(&pack).unwrap().len();
             repeat += 1;
         }
+        pack
+    }
+
+    fn make_named_pack_with(
+        name: &str,
+        status: Status,
+        updated_at: chrono::DateTime<Utc>,
+        revision: u64,
+    ) -> Pack {
+        let mut pack = Pack::new(PackId::new(), Some(PackName::new(name).unwrap()));
+        pack.status = status;
+        pack.updated_at = updated_at;
+        pack.created_at = updated_at - Duration::minutes(1);
+        pack.revision = revision.max(1);
+        pack.expires_at = updated_at + Duration::hours(24);
         pack
     }
 
@@ -788,6 +883,94 @@ mod tests {
             loaded[0].id, active.id,
             "loaded pack should be the active one"
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_by_name_prefers_latest_finalized_then_revision() {
+        let dir = tempdir().unwrap();
+        let adapter =
+            JsonStorageAdapter::new_with_max(dir.path().to_path_buf(), DEFAULT_MAX_PACK_BYTES);
+        let now = Utc::now();
+
+        let selected = make_named_pack_with("shared-pack", Status::Finalized, now, 9);
+        let older_finalized = make_named_pack_with(
+            "shared-pack",
+            Status::Finalized,
+            now - Duration::minutes(10),
+            4,
+        );
+        let newer_draft =
+            make_named_pack_with("shared-pack", Status::Draft, now + Duration::minutes(1), 99);
+        let same_updated_lower_revision =
+            make_named_pack_with("shared-pack", Status::Finalized, now, 3);
+
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &older_finalized, DEFAULT_MAX_PACK_BYTES)
+            .unwrap();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &selected, DEFAULT_MAX_PACK_BYTES)
+            .unwrap();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &newer_draft, DEFAULT_MAX_PACK_BYTES)
+            .unwrap();
+        JsonStorageAdapter::write_pack_atomic(
+            dir.path(),
+            &same_updated_lower_revision,
+            DEFAULT_MAX_PACK_BYTES,
+        )
+        .unwrap();
+
+        let resolved = adapter
+            .get_by_name(&PackName::new("shared-pack").unwrap())
+            .await
+            .expect("name lookup should succeed")
+            .expect("pack should be resolved");
+
+        assert_eq!(
+            resolved.id, selected.id,
+            "resolver must prefer latest finalized and use revision as deterministic tie-breaker"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_by_name_reports_candidate_ids_on_rank_tie() {
+        let dir = tempdir().unwrap();
+        let adapter =
+            JsonStorageAdapter::new_with_max(dir.path().to_path_buf(), DEFAULT_MAX_PACK_BYTES);
+        let shared_time = Utc::now();
+
+        let candidate_a = make_named_pack_with("ambiguous-pack", Status::Finalized, shared_time, 7);
+        let candidate_b = make_named_pack_with("ambiguous-pack", Status::Finalized, shared_time, 7);
+
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &candidate_a, DEFAULT_MAX_PACK_BYTES)
+            .unwrap();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &candidate_b, DEFAULT_MAX_PACK_BYTES)
+            .unwrap();
+
+        let err = adapter
+            .get_by_name(&PackName::new("ambiguous-pack").unwrap())
+            .await
+            .expect_err("rank tie must fail closed");
+
+        match err {
+            DomainError::Ambiguous {
+                message,
+                mut candidates,
+            } => {
+                candidates.sort();
+                let mut expected = vec![
+                    candidate_a.id.as_str().to_string(),
+                    candidate_b.id.as_str().to_string(),
+                ];
+                expected.sort();
+                assert_eq!(
+                    candidates, expected,
+                    "ambiguous error must include deterministic candidate ids"
+                );
+                assert!(
+                    message.contains("cannot break tie"),
+                    "message should explain deterministic tie reason, got: {message}"
+                );
+            }
+            other => panic!("expected DomainError::Ambiguous, got: {:?}", other),
+        }
     }
 
     #[test]
