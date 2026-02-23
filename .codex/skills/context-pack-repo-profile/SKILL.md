@@ -70,6 +70,12 @@ description: "Проектный профиль по работе с context_pac
 
 ---
 
+## Review handoff protocol (required by issue-55 contract)
+- Default review path: dedicated `review` agent requested from PR via `@review review` (required).
+- Review comment URL and `PASS|BLOCKED` verdict must be captured and posted in completion report.
+- `@codex review` is optional/secondary and never blocking; if unavailable, document fallback explicitly.
+- Review agent loop runs on finalized context pack (`pack_id`) as primary evidence.
+
 ## AC mapping шаблон для delivery-комментария в issue
 
 - `global skills` обновлён — да/нет.
@@ -77,5 +83,6 @@ description: "Проектный профиль по работе с context_pac
 - `global review loop` соблюдён (обязательный `review` loop + `pack_id` + `review comment` URL + `PASS/BLOCKED`).
 - `@codex` учтён как optional/non-blocking — да/нет.
 - Указаны новые output/get параметры (`compact|full`, `limit|offset|cursor|next`, `match`).
+- Указан обязательный review маршрут: `review` агент (required), `@codex` optional, review verdict captured, review comment URL + `pack_id` в completion.
 - QA handoff дисциплина соблюдена (`pack_id + summary`).
 - Тест-гейт выполнен: `cargo fmt --check && cargo test --all-targets --all-features`.
