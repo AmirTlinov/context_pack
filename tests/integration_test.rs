@@ -545,15 +545,23 @@ async fn test_finalize_rejects_ref_when_line_end_exceeds_file_length() {
 }
 
 #[tokio::test]
-async fn test_malformed_pack_file_fails_closed() {
+async fn test_malformed_pack_file_is_recovered_by_list() {
     let tmp = tempdir().unwrap();
     let storage_dir = tmp.path().join("packs");
     std::fs::create_dir_all(&storage_dir).unwrap();
-    std::fs::write(storage_dir.join("pk_aaaaaaaa.json"), "not-json").unwrap();
+    let malformed_path = storage_dir.join("pk_aaaaaaaa.json");
+    std::fs::write(&malformed_path, "not-json").unwrap();
 
     let (input_uc, _) = build_services(storage_dir, tmp.path().to_path_buf());
     let listed = input_uc.list(None, None, None, None).await;
-    assert!(matches!(listed, Err(DomainError::Deserialize(_))));
+    assert!(
+        matches!(listed, Ok(items) if items.is_empty()),
+        "expected malformed pack to be skipped"
+    );
+    assert!(
+        !malformed_path.exists(),
+        "malformed pack should be removed during lookup/list recovery"
+    );
 }
 
 #[tokio::test]

@@ -62,6 +62,69 @@ impl JsonStorageAdapter {
         Ok(serde_json::to_string(pack)?)
     }
 
+    #[cfg(test)]
+    fn new_with_max(storage_dir: PathBuf, max_pack_bytes: usize) -> Self {
+        Self {
+            storage_dir,
+            max_pack_bytes,
+        }
+    }
+
+    fn payload_too_large_error(path: &str, actual: usize, max: usize) -> DomainError {
+        DomainError::InvalidData(format!(
+            "pack '{}' payload is too large: {} bytes (max {})",
+            path, actual, max
+        ))
+    }
+
+    fn encoded_pack_payload(pack: &Pack, max_pack_bytes: usize) -> Result<String> {
+        let payload = Self::encode(pack)?;
+        if payload.len() > max_pack_bytes {
+            return Err(Self::payload_too_large_error(
+                pack.id.as_str(),
+                payload.len(),
+                max_pack_bytes,
+            ));
+        }
+        Ok(payload)
+    }
+
+    fn is_recoverable_pack_read_error(err: &DomainError) -> bool {
+        matches!(
+            err,
+            DomainError::Io(_) | DomainError::Deserialize(_) | DomainError::InvalidData(_),
+        )
+    }
+
+    fn remove_corrupt_pack_file(path: &Path, err: &DomainError) {
+        tracing::warn!(
+            "removing unreadable pack '{}' during read: {}",
+            path.display(),
+            err
+        );
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(remove_err) => {
+                tracing::warn!(
+                    "failed to remove unreadable pack '{}': {}",
+                    path.display(),
+                    remove_err
+                );
+            }
+        }
+    }
+
+    fn read_pack_for_lookup(path: &Path, max_pack_bytes: usize) -> Result<Option<Pack>> {
+        match Self::read_pack_from_path(path, max_pack_bytes) {
+            Ok(pack) => Ok(Some(pack)),
+            Err(err) if Self::is_recoverable_pack_read_error(&err) => {
+                Self::remove_corrupt_pack_file(path, &err);
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     fn decode(content: &str) -> Result<Pack> {
         let pack: Pack = serde_json::from_str(content)?;
         pack.migrate_schema()
@@ -131,10 +194,10 @@ impl JsonStorageAdapter {
         Self::decode_with_path(path, &raw)
     }
 
-    fn write_pack_atomic(storage_dir: &Path, pack: &Pack) -> Result<()> {
+    fn write_pack_atomic(storage_dir: &Path, pack: &Pack, max_pack_bytes: usize) -> Result<()> {
         let path = Self::pack_path(storage_dir, &pack.id);
         let tmp = storage_dir.join(format!("{}.tmp", pack.id.as_str()));
-        let content = Self::encode(pack)?;
+        let content = Self::encoded_pack_payload(pack, max_pack_bytes)?;
         std::fs::write(&tmp, content)
             .map_err(|e| DomainError::Io(format!("failed to write tmp pack: {}", e)))?;
         std::fs::rename(&tmp, &path)
@@ -187,7 +250,10 @@ impl JsonStorageAdapter {
         let now = Utc::now();
         let mut packs = Vec::new();
         for path in Self::list_pack_paths_sync(storage_dir)? {
-            let pack = Self::read_pack_from_path(&path, max_pack_bytes)?;
+            let pack = match Self::read_pack_for_lookup(&path, max_pack_bytes)? {
+                Some(pack) => pack,
+                None => continue,
+            };
             if !pack.is_expired(now) {
                 packs.push(pack);
             }
@@ -264,7 +330,11 @@ impl PackRepositoryPort for JsonStorageAdapter {
 
             if let Some(new_name) = &pack.name {
                 for existing_path in Self::list_pack_paths_sync(&storage_dir)? {
-                    let existing = Self::read_pack_from_path(&existing_path, max_pack_bytes)?;
+                    let existing = match Self::read_pack_for_lookup(&existing_path, max_pack_bytes)?
+                    {
+                        Some(existing) => existing,
+                        None => continue,
+                    };
                     if existing.name.as_ref() == Some(new_name) {
                         if let Err(e) = lock.unlock() {
                             tracing::warn!("failed to unlock repo lock: {e}");
@@ -277,7 +347,7 @@ impl PackRepositoryPort for JsonStorageAdapter {
                 }
             }
 
-            Self::write_pack_atomic(&storage_dir, &pack)?;
+            Self::write_pack_atomic(&storage_dir, &pack, max_pack_bytes)?;
             lock.unlock()
                 .map_err(|e| DomainError::Io(format!("failed to unlock repo: {}", e)))?;
             Ok(())
@@ -321,7 +391,8 @@ impl PackRepositoryPort for JsonStorageAdapter {
                     pack.id
                 )));
             }
-            let current = Self::read_pack_from_path(&path, max_pack_bytes)?;
+            let current = Self::read_pack_for_lookup(&path, max_pack_bytes)?
+                .ok_or_else(|| DomainError::NotFound(format!("pack '{}' not found", pack.id)))?;
             if current.revision != expected_revision {
                 if let Err(e) = lock.unlock() {
                     tracing::warn!("failed to unlock repo lock: {e}");
@@ -332,7 +403,7 @@ impl PackRepositoryPort for JsonStorageAdapter {
                 });
             }
 
-            Self::write_pack_atomic(&storage_dir, &pack)?;
+            Self::write_pack_atomic(&storage_dir, &pack, max_pack_bytes)?;
             lock.unlock()
                 .map_err(|e| DomainError::Io(format!("failed to unlock repo: {}", e)))?;
             Ok(())
@@ -351,7 +422,10 @@ impl PackRepositoryPort for JsonStorageAdapter {
             if !path.exists() {
                 return Ok(None);
             }
-            let pack = Self::read_pack_from_path(&path, max_pack_bytes)?;
+            let pack = match Self::read_pack_for_lookup(&path, max_pack_bytes)? {
+                Some(pack) => pack,
+                None => return Ok(None),
+            };
             if pack.is_expired(Utc::now()) {
                 match std::fs::remove_file(&path) {
                     Ok(()) => {}
@@ -461,6 +535,19 @@ mod tests {
         pack
     }
 
+    fn oversized_pack_by_growth(target_max: usize) -> Pack {
+        let mut pack = make_pack();
+        let mut payload_len = 0usize;
+        let mut repeat = 1usize;
+        while payload_len <= target_max {
+            let size = target_max.saturating_mul(repeat.max(1));
+            pack.brief = Some("x".repeat(size));
+            payload_len = JsonStorageAdapter::encode(&pack).unwrap().len();
+            repeat += 1;
+        }
+        pack
+    }
+
     #[test]
     fn test_encode_decode_roundtrip() {
         let pack = make_pack();
@@ -469,6 +556,53 @@ mod tests {
         assert_eq!(decoded.id, pack.id);
         assert_eq!(decoded.name, pack.name);
         assert_eq!(decoded.schema_version, pack.schema_version);
+    }
+
+    #[tokio::test]
+    async fn test_create_new_rejects_oversized_payload_with_validation_error() {
+        let dir = tempdir().unwrap();
+        let adapter = JsonStorageAdapter::new_with_max(dir.path().to_path_buf(), 128);
+        let pack = oversized_pack_by_growth(128);
+        let err = adapter.create_new(&pack).await.unwrap_err();
+        assert!(
+            matches!(err, DomainError::InvalidData(_)),
+            "expected validation error, got: {:?}",
+            err
+        );
+        assert!(
+            err.to_string().contains("payload is too large"),
+            "expected too-large payload message, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_save_with_expected_revision_rejects_oversized_payload_with_validation_error() {
+        let dir = tempdir().unwrap();
+        let base_pack = make_pack();
+        let create_adapter = JsonStorageAdapter::new_with_max(dir.path().to_path_buf(), 2048);
+        create_adapter.create_new(&base_pack).await.unwrap();
+
+        let mut update_pack = base_pack.clone();
+        update_pack.brief = Some("x".repeat(4096));
+        assert!(
+            !update_pack.brief.as_ref().unwrap().is_empty(),
+            "sanity: updated pack should have large payload"
+        );
+
+        let save_adapter = JsonStorageAdapter::new_with_max(dir.path().to_path_buf(), 1024);
+        let err = save_adapter
+            .save_with_expected_revision(&update_pack, update_pack.revision)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DomainError::InvalidData(_)),
+            "expected validation error, got: {:?}",
+            err
+        );
+        assert!(
+            err.to_string().contains("payload is too large"),
+            "expected too-large payload message, got: {err}"
+        );
     }
 
     #[test]
@@ -484,8 +618,9 @@ mod tests {
         let expired = make_expired_pack();
 
         // Write both packs
-        JsonStorageAdapter::write_pack_atomic(dir.path(), &active).unwrap();
-        JsonStorageAdapter::write_pack_atomic(dir.path(), &expired).unwrap();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &active, DEFAULT_MAX_PACK_BYTES).unwrap();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &expired, DEFAULT_MAX_PACK_BYTES)
+            .unwrap();
 
         // Both files should exist
         assert!(dir
@@ -521,8 +656,9 @@ mod tests {
         let active = make_pack();
         let expired = make_expired_pack();
 
-        JsonStorageAdapter::write_pack_atomic(dir.path(), &active).unwrap();
-        JsonStorageAdapter::write_pack_atomic(dir.path(), &expired).unwrap();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &active, DEFAULT_MAX_PACK_BYTES).unwrap();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &expired, DEFAULT_MAX_PACK_BYTES)
+            .unwrap();
 
         let loaded =
             JsonStorageAdapter::load_all_active_sync(dir.path(), DEFAULT_MAX_PACK_BYTES).unwrap();
@@ -547,7 +683,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let pack = make_pack();
 
-        JsonStorageAdapter::write_pack_atomic(dir.path(), &pack).unwrap();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &pack, DEFAULT_MAX_PACK_BYTES).unwrap();
 
         let expected_path = dir.path().join(format!("{}.json", pack.id.as_str()));
         assert!(expected_path.exists(), "pack file should exist after write");
@@ -558,6 +694,62 @@ mod tests {
                 .unwrap();
         assert_eq!(decoded.id, pack.id);
         assert_eq!(decoded.schema_version, pack.schema_version);
+    }
+
+    #[test]
+    fn test_load_all_active_skips_and_removes_corrupt_or_oversized_pack() {
+        let dir = tempdir().unwrap();
+        let max = 1024usize;
+
+        let valid = make_pack();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &valid, max).unwrap();
+        let valid_path = dir.path().join(format!("{}.json", valid.id.as_str()));
+        assert!(valid_path.exists(), "valid pack file should exist");
+
+        let corrupt_path = dir.path().join("pk_corrupt.json");
+        std::fs::write(&corrupt_path, "not-json").unwrap();
+        assert!(corrupt_path.exists(), "corrupt pack file should exist");
+
+        let oversized = oversized_pack_by_growth(1024);
+        let oversized_path = dir.path().join(format!("{}.json", oversized.id.as_str()));
+        let oversized_payload = JsonStorageAdapter::encode(&oversized).unwrap();
+        assert!(
+            oversized_payload.len() > max,
+            "oversized payload must exceed limit"
+        );
+        // write oversized payload directly to bypass pre-persist guards and simulate a corrupted pack on disk
+        std::fs::write(&oversized_path, oversized_payload).unwrap();
+        assert!(oversized_path.exists(), "oversized pack file should exist");
+
+        let loaded = JsonStorageAdapter::load_all_active_sync(dir.path(), max).unwrap();
+        assert_eq!(loaded.len(), 1, "expected only one valid pack");
+        assert_eq!(loaded[0].id, valid.id);
+
+        assert!(
+            !corrupt_path.exists(),
+            "corrupt pack should be removed by recovery"
+        );
+        assert!(
+            !oversized_path.exists(),
+            "oversized pack should be removed by recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_by_id_returns_none_for_corrupt_pack_and_recovers_file() {
+        let dir = tempdir().unwrap();
+        let max = 256usize;
+        let adapter = JsonStorageAdapter::new_with_max(dir.path().to_path_buf(), max);
+        let corrupt_id = PackId::new();
+        let path = dir.path().join(format!("{}.json", corrupt_id.as_str()));
+        std::fs::write(&path, "not-json").unwrap();
+
+        let result = adapter.get_by_id(&corrupt_id).await.unwrap();
+        assert!(result.is_none());
+        assert!(
+            !path.exists(),
+            "corrupt pack file should be removed by recovery"
+        );
     }
 
     #[test]
