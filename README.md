@@ -204,12 +204,13 @@ Coverage is checked by:
 1. collecting `llvm-cov` coverage for all targets and features;
 2. reading the TOTAL line-coverage value from the machine-readable report;
 3. failing only when current line coverage drops below the configured baseline.
+4. requiring a strict threshold: `0 < threshold <= 100` (negative / zero / above-100 thresholds are rejected).
 
 The baseline is reviewable and stored in:
 
 - `.github/coverage-baseline.json`
 
-To update policy intentionally, change `line_coverage_percent` in that file and document the rationale in the PR.  
+To update policy intentionally, change `line_coverage_percent` in that file (must stay within `0 < x <= 100`) and document the rationale in the PR.  
 Do **not** bypass coverage with `--fail-under` disable flags.
 
 You can run the same gate locally with:
