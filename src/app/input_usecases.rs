@@ -132,6 +132,11 @@ impl InputUseCases {
         self.resolve(identifier).await
     }
 
+    pub async fn delete_pack_file(&self, identifier: &str) -> Result<bool> {
+        let pack_id = PackId::parse(identifier)?;
+        self.repo.delete_pack_file(&pack_id).await
+    }
+
     // ── pack lifecycle ────────────────────────────────────────────────────────
 
     pub async fn create_with_tags_ttl(

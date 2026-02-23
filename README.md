@@ -176,8 +176,8 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 ## Tool contract (short)
 
 - Pack id format: `pk_[a-z2-7]{8}`.
-- `input` actions: `list`, `create`, `get`, `upsert_section`, `delete_section`, `upsert_ref`, `delete_ref`, `upsert_diagram`, `set_meta`, `set_status`, `touch_ttl`.
-- All mutating actions except `create` require `expected_revision`.
+- `input` actions: `list`, `create`, `get`, `upsert_section`, `delete_section`, `upsert_ref`, `delete_ref`, `upsert_diagram`, `set_meta`, `set_status`, `touch_ttl`, `delete_pack`.
+- All mutating actions except `create` and `delete_pack` require `expected_revision`.
 - `create` requires `ttl_minutes`.
 - `touch_ttl` accepts exactly one: `ttl_minutes` or `extend_minutes`.
 - `output` actions stay `list|get` (no extra tool/action sprawl).
@@ -225,6 +225,10 @@ scripts/check_coverage_baseline.sh
 - `stale_ref` → update or delete outdated anchor.
 - `not_found` → pack likely expired by TTL.
 - `tool output too large` → split pack into smaller sections (rendered output is bounded).
+- `malformed/oversized pack is visible` → run deterministic cleanup:
+  1. Identify the bad pack id: `pack_id`.
+  2. Call `input` with `{ "action": "delete_pack", "id": "<pack_id>" }`.
+  3. Re-run your normal query (`output`/`list`) to confirm the remaining healthy packs.
 
 </details>
 
@@ -393,8 +397,8 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 ## Краткий контракт инструментов
 
 - Формат id: `pk_[a-z2-7]{8}`.
-- `input` actions: `list`, `create`, `get`, `upsert_section`, `delete_section`, `upsert_ref`, `delete_ref`, `upsert_diagram`, `set_meta`, `set_status`, `touch_ttl`.
-- Все мутации, кроме `create`, требуют `expected_revision`.
+- `input` actions: `list`, `create`, `get`, `upsert_section`, `delete_section`, `upsert_ref`, `delete_ref`, `upsert_diagram`, `set_meta`, `set_status`, `touch_ttl`, `delete_pack`.
+- Все мутации, кроме `create` и `delete_pack`, требуют `expected_revision`.
 - `create` требует `ttl_minutes`.
 - `touch_ttl` принимает строго одно: `ttl_minutes` или `extend_minutes`.
 - `output` остаётся с actions только `list|get` (без разрастания API).
@@ -414,5 +418,9 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 - `stale_ref` → обновить или удалить устаревший якорь.
 - `not_found` → пакет, скорее всего, истёк по TTL.
 - `tool output too large` → разбить пакет на более мелкие секции.
+- `есть повреждённый/oversized pack` → сделать точечный cleanup:
+  1. Найдите `pack_id` проблемного файла.
+  2. Вызовите `input` с `{ "action": "delete_pack", "id": "<pack_id>" }`.
+  3. Проверьте `output`/`list`, что здоровые пакеты по-прежнему доступны.
 
 </details>

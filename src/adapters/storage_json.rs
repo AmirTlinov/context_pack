@@ -246,6 +246,18 @@ impl JsonStorageAdapter {
         Ok(())
     }
 
+    fn delete_pack_file_sync(storage_dir: &Path, id: &PackId) -> Result<bool> {
+        let path = Self::pack_path(storage_dir, id);
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(DomainError::Io(format!(
+                "failed to delete pack file: {}",
+                e
+            ))),
+        }
+    }
+
     fn load_all_active_sync(storage_dir: &Path, max_pack_bytes: usize) -> Result<Vec<Pack>> {
         let now = Utc::now();
         let mut packs = Vec::new();
@@ -411,6 +423,38 @@ impl PackRepositoryPort for JsonStorageAdapter {
         .await
         .map_err(|e| DomainError::Io(format!("task execution failed: {}", e)))??;
         Ok(())
+    }
+
+    async fn delete_pack_file(&self, id: &PackId) -> Result<bool> {
+        let storage_dir = self.storage_dir.clone();
+        let id = id.clone();
+        let removed = task::spawn_blocking(move || -> Result<bool> {
+            Self::ensure_dir_sync(&storage_dir)?;
+            let lock_path = Self::repo_lock_path(&storage_dir);
+            let lock = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)
+                .map_err(|e| {
+                    DomainError::Io(format!(
+                        "failed to open repo lock '{}': {}",
+                        lock_path.display(),
+                        e
+                    ))
+                })?;
+            lock.lock_exclusive()
+                .map_err(|e| DomainError::Io(format!("failed to lock repo: {}", e)))?;
+            let removed = Self::delete_pack_file_sync(&storage_dir, &id);
+            if let Err(err) = lock.unlock() {
+                tracing::warn!("failed to unlock repo lock: {err}");
+            }
+            removed
+        })
+        .await
+        .map_err(|e| DomainError::Io(format!("task execution failed: {}", e)))??;
+        Ok(removed)
     }
 
     async fn get_by_id(&self, id: &PackId) -> Result<Option<Pack>> {
@@ -676,6 +720,42 @@ mod tests {
             JsonStorageAdapter::list_pack_paths_sync(Path::new("/nonexistent/path/xyz/abc_12345"));
         assert!(result.is_ok(), "should not error on missing dir");
         assert!(result.unwrap().is_empty(), "should return empty vec");
+    }
+
+    #[tokio::test]
+    async fn test_delete_pack_file_removes_target_without_reading_payload() {
+        let dir = tempdir().unwrap();
+        let storage =
+            JsonStorageAdapter::new_with_max(dir.path().to_path_buf(), DEFAULT_MAX_PACK_BYTES);
+        let valid = make_pack();
+        let bad_id = PackId::new();
+        let bad_path = dir.path().join(format!("{}.json", bad_id.as_str()));
+
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &valid, DEFAULT_MAX_PACK_BYTES).unwrap();
+        std::fs::write(&bad_path, "not-json").unwrap();
+
+        assert!(
+            storage
+                .delete_pack_file(&bad_id)
+                .await
+                .expect("delete operation should succeed"),
+            "delete should report removed for existing file"
+        );
+        assert!(
+            !bad_path.exists(),
+            "bad file should be removed by deterministic deletion path"
+        );
+        assert!(
+            std::fs::metadata(dir.path().join(format!("{}.json", valid.id.as_str()))).is_ok(),
+            "valid file should remain"
+        );
+        assert!(
+            !storage
+                .delete_pack_file(&bad_id)
+                .await
+                .expect("delete operation should not fail on missing file"),
+            "delete should return false when file is already gone"
+        );
     }
 
     #[test]

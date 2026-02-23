@@ -171,6 +171,17 @@ pub(super) async fn handle_input_tool(
                 .await?;
             tool_success("touch_ttl", serde_json::to_value(pack)?)
         }
+        "delete_pack" => {
+            let id = req_str(args, "id")?;
+            let deleted = uc.delete_pack_file(&id).await?;
+            tool_success(
+                "delete_pack",
+                serde_json::json!({
+                    "id": id,
+                    "deleted": deleted
+                }),
+            )
+        }
         _ => Err(DomainError::InvalidData(format!(
             "unknown input action '{}'",
             action

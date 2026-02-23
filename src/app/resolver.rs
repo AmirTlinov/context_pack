@@ -114,6 +114,10 @@ mod tests {
         async fn purge_expired(&self) -> Result<()> {
             Ok(())
         }
+
+        async fn delete_pack_file(&self, id: &PackId) -> Result<bool> {
+            Ok(self.0.lock().unwrap().remove(id.as_str()).is_some())
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
