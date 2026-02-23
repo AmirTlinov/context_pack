@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::app::output_usecases::OutputUseCases;
+use crate::app::output_usecases::{OutputGetRequest, OutputMode, OutputUseCases};
 use crate::domain::errors::DomainError;
 use crate::domain::models::Pack;
 
@@ -33,8 +33,15 @@ pub(super) async fn handle_output_tool(
         }
         "get" => {
             let ident = req_identifier(args)?;
-            let status = status_opt(args, "status")?;
-            let out_str = uc.get_rendered(&ident, status).await?;
+            let request = OutputGetRequest {
+                status_filter: status_opt(args, "status")?,
+                mode: output_mode_opt(args)?,
+                limit: usize_opt(args, "limit")?,
+                offset: usize_opt(args, "offset")?,
+                cursor: str_opt(args, "cursor"),
+                match_regex: str_opt(args, "match"),
+            };
+            let out_str = uc.get_rendered_with_request(&ident, request).await?;
             tool_text_success(out_str)
         }
         _ => Err(DomainError::InvalidData(format!(
@@ -73,4 +80,11 @@ fn format_pack_list_markdown(packs: &[Pack]) -> String {
         ));
     }
     out
+}
+
+fn output_mode_opt(args: &Value) -> Result<Option<OutputMode>, DomainError> {
+    let Some(raw) = args.get("mode").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    Ok(Some(raw.parse::<OutputMode>()?))
 }
