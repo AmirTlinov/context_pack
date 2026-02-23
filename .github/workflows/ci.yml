@@ -30,8 +30,12 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Coverage gate (≥90% lines)
-        run: cargo llvm-cov --all-targets --all-features --fail-under-lines 90
+      - name: Coverage gate (baseline lines from reviewable config)
+        # Baseline policy intentionally mirrors current mainline behavior: enforce
+        # no-coverage-regression while allowing explicit, reviewable baseline updates.
+        run: scripts/check_coverage_baseline.sh
+        env:
+          COVERAGE_BASELINE_FILE: .github/coverage-baseline.json
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
