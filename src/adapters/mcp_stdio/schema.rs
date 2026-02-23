@@ -18,6 +18,7 @@ pub(super) fn tools_schema() -> Value {
                                 "upsert_ref", "delete_ref",
                                 "upsert_diagram",
                                 "set_meta", "set_status",
+                                "delete_pack",
                                 "touch_ttl"
                             ]
                         },
