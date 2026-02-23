@@ -406,6 +406,104 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
 }
 
 #[tokio::test]
+async fn e2e_input_delete_pack_is_deterministic() -> Result<()> {
+    let dir = tempdir()?;
+    let storage_root = dir.path().join("storage");
+    let source_root = dir.path().join("source");
+    tokio::fs::create_dir_all(&storage_root).await?;
+    tokio::fs::create_dir_all(&source_root).await?;
+
+    let mut client = McpE2EClient::spawn(&storage_root, &source_root).await?;
+
+    let result: Result<()> = async {
+        let _ = client
+            .call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .await?;
+
+        let create = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"create",
+                        "name":"delete-pack",
+                        "ttl_minutes": 60
+                    }
+                }
+            }))
+            .await?;
+        let created_payload = parse_tool_payload(&create)?;
+        let pack_id = created_payload["payload"]["id"]
+            .as_str()
+            .context("missing created pack id")?
+            .to_string();
+
+        let pack_path = storage_root.join("packs").join(format!("{}.json", pack_id));
+        assert!(pack_path.exists(), "new pack file must exist before delete_pack");
+
+        let deleted = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":3,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"delete_pack",
+                        "id": pack_id
+                    }
+                }
+            }))
+            .await?;
+        let delete_payload = parse_tool_payload(&deleted)?;
+        assert_eq!(delete_payload["payload"]["deleted"].as_bool(), Some(true));
+        assert!(!pack_path.exists(), "delete_pack action should remove pack file");
+
+        let list = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":4,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{ "action":"list" }
+                }
+            }))
+            .await?;
+        let list_payload = parse_tool_payload(&list)?;
+        assert_eq!(list_payload["payload"]["count"].as_u64(), Some(0));
+
+        let deleted_again = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":5,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"delete_pack",
+                        "id": pack_path.file_name().unwrap().to_string_lossy().trim_end_matches(".json")
+                    }
+                }
+            }))
+            .await?;
+        let deleted_again_payload = parse_tool_payload(&deleted_again)?;
+        assert_eq!(
+            deleted_again_payload["payload"]["deleted"].as_bool(),
+            Some(false)
+        );
+        Ok(())
+    }
+    .await;
+
+    client.stop().await?;
+    result
+}
+
+#[tokio::test]
 async fn e2e_tool_error_contract_is_machine_readable() -> Result<()> {
     let dir = tempdir()?;
     let storage_root = dir.path().join("storage");
