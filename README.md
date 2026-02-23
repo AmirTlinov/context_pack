@@ -225,9 +225,10 @@ scripts/check_coverage_baseline.sh
 - `stale_ref` → update or delete outdated anchor.
 - `not_found` → pack likely expired by TTL.
 - `tool output too large` → split pack into smaller sections (rendered output is bounded).
-- `malformed/oversized pack is visible` → run deterministic cleanup:
-  1. Identify the bad pack id: `pack_id`.
-  2. Call `input` with `{ "action": "delete_pack", "id": "<pack_id>" }`.
+- malformed / oversized / unreadable pack files are handled deterministically:
+  - List path: `input`/`output` actions that enumerate packs remove malformed/oversized pack files and proceed.
+  - Purge path: TTL purge also removes malformed/oversized files and keeps healthy packs intact.
+  - `delete_pack`: call `input` with `{ "action": "delete_pack", "id": "<pack_id>" }` when targeting a known corrupted pack.
   3. Re-run your normal query (`output`/`list`) to confirm the remaining healthy packs.
 
 </details>
@@ -418,7 +419,10 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 - `stale_ref` → обновить или удалить устаревший якорь.
 - `not_found` → пакет, скорее всего, истёк по TTL.
 - `tool output too large` → разбить пакет на более мелкие секции.
-- `есть повреждённый/oversized pack` → сделать точечный cleanup:
+- есть повреждённый/oversized/unreadable pack:
+  - `input/output list` автоматически очищают такие pack-файлы при перечислении;
+  - `purge_expired` удаляет такие файлы при background/оперативной очистке TTL;
+  - для точечного удаления: `input` с `{ "action": "delete_pack", "id": "<pack_id>" }`.
   1. Найдите `pack_id` проблемного файла.
   2. Вызовите `input` с `{ "action": "delete_pack", "id": "<pack_id>" }`.
   3. Проверьте `output`/`list`, что здоровые пакеты по-прежнему доступны.
