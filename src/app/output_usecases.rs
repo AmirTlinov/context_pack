@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::{
-        ports::{CodeExcerptPort, ListFilter, PackRepositoryPort},
+        ports::{CodeExcerptPort, FreshnessState, ListFilter, PackRepositoryPort},
         resolver::resolve_pack,
     },
     domain::{
@@ -124,9 +124,22 @@ impl OutputUseCases {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<Vec<Pack>> {
+        self.list_filtered_with_freshness(status, query, limit, offset, None)
+            .await
+    }
+
+    pub async fn list_filtered_with_freshness(
+        &self,
+        status: Option<Status>,
+        query: Option<String>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        freshness: Option<FreshnessState>,
+    ) -> Result<Vec<Pack>> {
         self.repo
             .list_packs(ListFilter {
                 status,
+                freshness,
                 query,
                 limit,
                 offset,
@@ -541,6 +554,8 @@ fn write_legend_header(out: &mut String, pack: &Pack) {
         .as_deref()
         .or(pack.name.as_ref().map(|n| n.as_str()))
         .unwrap_or("Untitled");
+    let now = chrono::Utc::now();
+    let freshness_state = FreshnessState::from_pack(pack, now);
     let _ = write!(out, "# Context pack: {}\n\n", title);
     let _ = writeln!(out, "- id: {}", pack.id);
     if let Some(name) = &pack.name {
@@ -549,11 +564,11 @@ fn write_legend_header(out: &mut String, pack: &Pack) {
     let _ = writeln!(out, "- status: {}", pack.status);
     let _ = writeln!(out, "- revision: {}", pack.revision);
     let _ = writeln!(out, "- expires_at: {}", pack.expires_at.to_rfc3339());
-    let _ = writeln!(
-        out,
-        "- ttl_remaining: {}",
-        pack.ttl_remaining_human(chrono::Utc::now())
-    );
+    let _ = writeln!(out, "- ttl_remaining: {}", pack.ttl_remaining_human(now));
+    let _ = writeln!(out, "- freshness_state: {}", freshness_state);
+    if let Some(warning) = freshness_state.warning_text() {
+        let _ = writeln!(out, "- warning: {}", warning);
+    }
     if !pack.tags.is_empty() {
         let _ = writeln!(out, "- tags: {}", pack.tags.join(", "));
     }

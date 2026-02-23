@@ -31,6 +31,11 @@ pub(super) fn tools_schema() -> Value {
                         "extend_minutes": { "type": "integer", "description": "Extend existing TTL by this many minutes (touch_ttl)." },
                         "expected_revision": { "type": "integer", "description": "Required for mutating actions to prevent lost updates." },
                         "status": { "type": "string", "enum": ["draft", "finalized"] },
+                        "freshness": {
+                            "type": "string",
+                            "enum": ["fresh", "expiring_soon", "expired"],
+                            "description": "Optional list filter by freshness state."
+                        },
                         "query": { "type": "string", "description": "Text search for list" },
                         "limit": { "type": "integer" },
                         "offset": { "type": "integer" },
@@ -67,6 +72,11 @@ pub(super) fn tools_schema() -> Value {
                             "type": "string",
                             "enum": ["draft", "finalized"],
                             "description": "Optional status filter (for list and get)"
+                        },
+                        "freshness": {
+                            "type": "string",
+                            "enum": ["fresh", "expiring_soon", "expired"],
+                            "description": "Optional freshness filter for list."
                         },
                         "mode": {
                             "type": "string",

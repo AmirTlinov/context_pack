@@ -8,6 +8,7 @@ use mcp_context_pack::{
     app::{
         input_usecases::{InputUseCases, TouchTtlMode, UpsertRefRequest},
         output_usecases::{OutputGetRequest, OutputMode, OutputUseCases},
+        ports::FreshnessState,
     },
     domain::errors::DomainError,
     domain::models::Pack,
@@ -799,6 +800,57 @@ async fn test_expired_pack_is_not_visible_immediately_in_list() {
     assert!(
         listed.iter().all(|p| p.id.as_str() != pack_id),
         "expired pack must be invisible in list"
+    );
+
+    let expired_only = input_uc
+        .list_with_freshness(None, None, None, None, Some(FreshnessState::Expired))
+        .await
+        .unwrap();
+    assert!(
+        expired_only.iter().any(|p| p.id.as_str() == pack_id),
+        "freshness filter must surface expired packs intentionally"
+    );
+}
+
+#[tokio::test]
+async fn test_get_rendered_exposes_freshness_state_and_warning_when_expiring_soon() {
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("packs");
+    let source_root = tmp.path().join("src");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::write(source_root.join("sample.rs"), "fn sample() {}\n").unwrap();
+
+    let (input_uc, output_uc) = build_services(storage_dir.clone(), tmp.path().to_path_buf());
+
+    let pack = input_uc
+        .create_with_tags_ttl(Some("expiring-pack".into()), None, None, None, 30)
+        .await
+        .unwrap();
+    let id = pack.id.as_str().to_string();
+    let path = storage_dir.join(format!("{}.json", id));
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    value["expires_at"] = serde_json::Value::String(
+        (Utc::now() + Duration::seconds(FreshnessState::EXPIRING_SOON_THRESHOLD_SECONDS))
+            .to_rfc3339(),
+    );
+    std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
+
+    let rendered = output_uc.get_rendered(&id, None).await.unwrap();
+    assert_eq!(
+        legend_value(&rendered, "freshness_state").as_deref(),
+        Some("expiring_soon")
+    );
+    assert!(
+        legend_value(&rendered, "warning")
+            .as_deref()
+            .is_some_and(|warning| warning.contains("expiring soon")),
+        "expiring packs must include concise warning text"
+    );
+    assert!(
+        legend_value(&rendered, "expires_at").is_some()
+            && legend_value(&rendered, "ttl_remaining").is_some(),
+        "get legend must include stable freshness metadata"
     );
 }
 

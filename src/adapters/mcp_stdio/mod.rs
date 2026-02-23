@@ -12,6 +12,7 @@ use tokio::time::Duration;
 
 use crate::app::input_usecases::InputUseCases;
 use crate::app::output_usecases::OutputUseCases;
+use crate::app::ports::FreshnessState;
 use crate::domain::errors::DomainError;
 use crate::domain::models::Pack;
 use crate::domain::types::Status;
@@ -268,6 +269,8 @@ pub(super) fn tool_text_success(text: String) -> Result<Value, DomainError> {
 
 pub(super) fn pack_summary(pack: &Pack) -> Value {
     let now = chrono::Utc::now();
+    let ttl_remaining_human = pack.ttl_remaining_human(now);
+    let freshness_state = FreshnessState::from_pack(pack, now);
     json!({
         "id": pack.id,
         "name": pack.name,
@@ -277,7 +280,9 @@ pub(super) fn pack_summary(pack: &Pack) -> Value {
         "updated_at": pack.updated_at,
         "expires_at": pack.expires_at,
         "ttl_remaining_seconds": pack.ttl_remaining_seconds(now),
-        "ttl_remaining_human": pack.ttl_remaining_human(now)
+        "ttl_remaining_human": ttl_remaining_human.clone(),
+        "ttl_remaining": ttl_remaining_human,
+        "freshness_state": freshness_state
     })
 }
 
@@ -357,6 +362,16 @@ pub(super) fn status_opt(args: &Value, key: &str) -> Result<Option<Status>, Doma
         return Ok(None);
     };
     Ok(Some(raw.parse::<Status>()?))
+}
+
+pub(super) fn freshness_opt(
+    args: &Value,
+    key: &str,
+) -> Result<Option<FreshnessState>, DomainError> {
+    let Some(raw) = str_opt(args, key) else {
+        return Ok(None);
+    };
+    Ok(Some(raw.parse::<FreshnessState>()?))
 }
 
 pub(super) fn tags_opt(args: &Value) -> Result<Option<Vec<String>>, DomainError> {
