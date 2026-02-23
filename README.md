@@ -182,6 +182,15 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 - `touch_ttl` accepts exactly one: `ttl_minutes` or `extend_minutes`.
 - `output` actions stay `list|get` (no extra tool/action sprawl).
 - `output get` additive args: `mode(full|compact)`, `limit`, `offset`, `cursor`, `match` (regex).
+- Deterministic `output get(name=...)` resolution order:
+  1. prefer `finalized` candidates over non-finalized;
+  2. inside that status tier, pick latest `updated_at`;
+  3. if still tied, pick highest `revision`;
+  4. if still tied, fail closed with `ambiguous` + `details.candidate_ids`.
+- Successful `output get` includes selection rationale in LEGEND:
+  - `selected_by`
+  - `selected_revision`
+  - `selected_status`
 - Backward compatibility: `output get` without paging args keeps legacy full markdown shape.
 - `mode=compact` keeps ref metadata and stale markers, but omits code fences for refs.
 - Paging contract: `limit` + (`offset` first page or `cursor` continuation) with deterministic legend fields `has_more` + `next`.
@@ -225,11 +234,45 @@ scripts/check_coverage_baseline.sh
 - `stale_ref` → update or delete outdated anchor.
 - `not_found` → pack likely expired by TTL.
 - `tool output too large` → split pack into smaller sections (rendered output is bounded).
+- name ambiguity is fail-closed:
+  - error code: `ambiguous`
+  - details: `candidate_ids` list for explicit operator choice/retry by exact id.
 - malformed / oversized / unreadable pack files are handled deterministically:
   - List path: `input`/`output` actions that enumerate packs remove malformed/oversized pack files and proceed.
   - Purge path: TTL purge also removes malformed/oversized files and keeps healthy packs intact.
   - `delete_pack`: call `input` with `{ "action": "delete_pack", "id": "<pack_id>" }` when targeting a known corrupted pack.
   3. Re-run your normal query (`output`/`list`) to confirm the remaining healthy packs.
+
+### Deterministic read examples
+
+Exact id read:
+
+```json
+{
+  "name": "output",
+  "arguments": {
+    "action": "get",
+    "id": "pk_abcd2345"
+  }
+}
+```
+
+Name-based read (deterministic/fail-closed):
+
+```json
+{
+  "name": "output",
+  "arguments": {
+    "action": "get",
+    "name": "auth-handoff-pack"
+  }
+}
+```
+
+In successful output LEGEND, inspect:
+- `selected_by` (`exact_id` or name-based policy marker)
+- `selected_revision`
+- `selected_status`
 
 </details>
 
@@ -404,6 +447,15 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 - `touch_ttl` принимает строго одно: `ttl_minutes` или `extend_minutes`.
 - `output` остаётся с actions только `list|get` (без разрастания API).
 - Дополнительные аргументы `output get`: `mode(full|compact)`, `limit`, `offset`, `cursor`, `match` (regex).
+- Детерминированное разрешение `output get(name=...)`:
+  1. приоритет `finalized` над не-finalized;
+  2. внутри выбранного статуса — максимальный `updated_at`;
+  3. при равенстве — максимальный `revision`;
+  4. если ничья осталась — fail-closed: `ambiguous` + `details.candidate_ids`.
+- Успешный `output get` добавляет в LEGEND метаданные выбора:
+  - `selected_by`
+  - `selected_revision`
+  - `selected_status`
 - Обратная совместимость: `output get` без paging-аргументов возвращает прежний full-markdown формат.
 - `mode=compact` сохраняет метаданные ref и stale-маркеры, но убирает code fences у ref.
 - Paging-контракт: `limit` + (`offset` для первой страницы или `cursor` для продолжения) с детерминированными `has_more` и `next` в LEGEND.
@@ -419,6 +471,9 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 - `stale_ref` → обновить или удалить устаревший якорь.
 - `not_found` → пакет, скорее всего, истёк по TTL.
 - `tool output too large` → разбить пакет на более мелкие секции.
+- неоднозначный выбор по `name` fail-closed:
+  - код ошибки: `ambiguous`
+  - `details.candidate_ids`: список кандидатов для явного выбора по точному `id`.
 - есть повреждённый/oversized/unreadable pack:
   - `input/output list` автоматически очищают такие pack-файлы при перечислении;
   - `purge_expired` удаляет такие файлы при background/оперативной очистке TTL;
@@ -426,5 +481,36 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
   1. Найдите `pack_id` проблемного файла.
   2. Вызовите `input` с `{ "action": "delete_pack", "id": "<pack_id>" }`.
   3. Проверьте `output`/`list`, что здоровые пакеты по-прежнему доступны.
+
+### Примеры детерминированного чтения
+
+Чтение по точному id:
+
+```json
+{
+  "name": "output",
+  "arguments": {
+    "action": "get",
+    "id": "pk_abcd2345"
+  }
+}
+```
+
+Чтение по name (детерминированно/fail-closed):
+
+```json
+{
+  "name": "output",
+  "arguments": {
+    "action": "get",
+    "name": "auth-handoff-pack"
+  }
+}
+```
+
+В успешном LEGEND проверяйте:
+- `selected_by` (`exact_id` или маркер name-политики)
+- `selected_revision`
+- `selected_status`
 
 </details>
