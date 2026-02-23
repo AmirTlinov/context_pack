@@ -9,7 +9,8 @@ use mcp_context_pack::{
         output_usecases::{OutputGetRequest, OutputMode, OutputUseCases},
     },
     domain::errors::DomainError,
-    domain::types::Status,
+    domain::models::Pack,
+    domain::types::{PackId, PackName, Status},
 };
 
 fn build_services(
@@ -21,6 +22,16 @@ fn build_services(
     let input_uc = Arc::new(InputUseCases::new(storage.clone(), excerpts.clone()));
     let output_uc = Arc::new(OutputUseCases::new(storage, excerpts));
     (input_uc, output_uc)
+}
+
+fn oversized_pack_for_limit(id: PackId, max_bytes: usize) -> Pack {
+    let pack_id = id.clone();
+    let mut pack = Pack::new(
+        id,
+        Some(PackName::new(&format!("oversized-{pack_id}")).unwrap()),
+    );
+    pack.brief = Some("x".repeat(max_bytes + 1));
+    pack
 }
 
 #[tokio::test]
@@ -545,15 +556,99 @@ async fn test_finalize_rejects_ref_when_line_end_exceeds_file_length() {
 }
 
 #[tokio::test]
-async fn test_malformed_pack_file_fails_closed() {
+async fn test_malformed_pack_file_is_recovered_by_list() {
     let tmp = tempdir().unwrap();
     let storage_dir = tmp.path().join("packs");
     std::fs::create_dir_all(&storage_dir).unwrap();
-    std::fs::write(storage_dir.join("pk_aaaaaaaa.json"), "not-json").unwrap();
+    let malformed_path = storage_dir.join("pk_aaaaaaaa.json");
+    std::fs::write(&malformed_path, "not-json").unwrap();
 
     let (input_uc, _) = build_services(storage_dir, tmp.path().to_path_buf());
     let listed = input_uc.list(None, None, None, None).await;
-    assert!(matches!(listed, Err(DomainError::Deserialize(_))));
+    assert!(
+        matches!(listed, Ok(items) if items.is_empty()),
+        "expected malformed pack to be skipped"
+    );
+    assert!(
+        !malformed_path.exists(),
+        "malformed pack should be removed during lookup/list recovery"
+    );
+}
+
+#[tokio::test]
+async fn test_delete_pack_action_recovers_corrupted_and_oversized_without_affecting_healthy_pack() {
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("packs");
+    std::fs::create_dir_all(&storage_dir).unwrap();
+    let (input_uc, _) = build_services(storage_dir.clone(), tmp.path().to_path_buf());
+
+    let healthy_pack = input_uc
+        .create_with_tags_ttl(Some("healthy-pack".into()), None, None, None, 30)
+        .await
+        .unwrap();
+    let healthy_id = healthy_pack.id.clone();
+
+    let malformed_id = PackId::new();
+    let malformed_path = storage_dir.join(format!("{}.json", malformed_id.as_str()));
+    std::fs::write(&malformed_path, "not-json").unwrap();
+
+    let oversized_id = PackId::new();
+    let oversized_pack = oversized_pack_for_limit(oversized_id.clone(), 524_288);
+    let oversized_payload = serde_json::to_string(&oversized_pack).unwrap();
+    assert!(
+        oversized_payload.len() > 524_288,
+        "oversized payload must be above default max"
+    );
+    let oversized_path = storage_dir.join(format!("{}.json", oversized_id.as_str()));
+    std::fs::write(&oversized_path, oversized_payload).unwrap();
+
+    assert!(
+        malformed_path.exists(),
+        "corrupted pack should exist before recovery"
+    );
+    assert!(
+        oversized_path.exists(),
+        "oversized pack should exist before recovery"
+    );
+
+    let healthy_before = input_uc
+        .get(healthy_id.as_str())
+        .await
+        .expect("healthy pack should remain readable");
+    assert_eq!(healthy_before.id, healthy_id);
+
+    assert!(
+        input_uc
+            .delete_pack_file(malformed_id.as_str())
+            .await
+            .unwrap(),
+        "delete_pack should remove malformed pack"
+    );
+    assert!(
+        input_uc
+            .delete_pack_file(oversized_id.as_str())
+            .await
+            .unwrap(),
+        "delete_pack should remove oversized pack"
+    );
+    assert!(
+        !malformed_path.exists(),
+        "malformed pack should be removed by operator recovery action"
+    );
+    assert!(
+        !oversized_path.exists(),
+        "oversized pack should be removed by operator recovery action"
+    );
+
+    let healthy_after = input_uc.get(healthy_id.as_str()).await.unwrap();
+    assert_eq!(healthy_after.id, healthy_id);
+    let listed = input_uc.list(None, None, None, None).await.unwrap();
+    assert_eq!(
+        listed.len(),
+        1,
+        "healthy pack should be only remaining pack after recovery cleanup"
+    );
+    assert_eq!(listed[0].id, healthy_id);
 }
 
 #[tokio::test]

@@ -13,6 +13,7 @@ use crate::domain::{
 pub trait PackRepositoryPort: Send + Sync {
     async fn create_new(&self, pack: &Pack) -> Result<()>;
     async fn save_with_expected_revision(&self, pack: &Pack, expected_revision: u64) -> Result<()>;
+    async fn delete_pack_file(&self, id: &PackId) -> Result<bool>;
     async fn get_by_id(&self, id: &PackId) -> Result<Option<Pack>>;
     async fn get_by_name(&self, name: &PackName) -> Result<Option<Pack>>;
     async fn list_packs(&self, filter: ListFilter) -> Result<Vec<Pack>>;
