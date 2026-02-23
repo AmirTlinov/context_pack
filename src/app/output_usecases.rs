@@ -1,5 +1,9 @@
-use std::fmt::Write as FmtWrite;
+use std::fmt::{self, Write as FmtWrite};
+use std::str::FromStr;
 use std::sync::Arc;
+
+use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     app::{
@@ -12,6 +16,88 @@ use crate::{
         types::Status,
     },
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputMode {
+    #[default]
+    Full,
+    Compact,
+}
+
+impl fmt::Display for OutputMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OutputMode::Full => write!(f, "full"),
+            OutputMode::Compact => write!(f, "compact"),
+        }
+    }
+}
+
+impl FromStr for OutputMode {
+    type Err = DomainError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim() {
+            "full" => Ok(Self::Full),
+            "compact" => Ok(Self::Compact),
+            other => Err(DomainError::InvalidData(format!(
+                "'mode' must be one of: full, compact (got '{}')",
+                other
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OutputGetRequest {
+    pub status_filter: Option<Status>,
+    pub mode: Option<OutputMode>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub cursor: Option<String>,
+    pub match_regex: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OutputCursorV1 {
+    v: u8,
+    pack_id: String,
+    revision: u64,
+    next_offset: usize,
+    fingerprint: String,
+    mode: OutputMode,
+    status_filter: Option<Status>,
+    limit: Option<usize>,
+    match_regex: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct EffectiveGetArgs {
+    status_filter: Option<Status>,
+    mode: OutputMode,
+    limit: Option<usize>,
+    start_offset: usize,
+    match_regex: Option<String>,
+    paging_active: bool,
+    fingerprint: String,
+}
+
+#[derive(Debug, Clone)]
+enum ChunkKind {
+    Ref { group: String },
+    Diagram,
+}
+
+#[derive(Debug, Clone)]
+struct RenderChunk {
+    section_title: String,
+    section_key: String,
+    section_description: Option<String>,
+    kind: ChunkKind,
+    body_markdown: String,
+    searchable_text: String,
+}
 
 pub struct OutputUseCases {
     repo: Arc<dyn PackRepositoryPort>,
@@ -55,9 +141,25 @@ impl OutputUseCases {
         identifier: &str,
         status_filter: Option<Status>,
     ) -> Result<String> {
-        let pack = self.resolve(identifier).await?;
+        self.get_rendered_with_request(
+            identifier,
+            OutputGetRequest {
+                status_filter,
+                ..Default::default()
+            },
+        )
+        .await
+    }
 
-        if let Some(required) = status_filter {
+    pub async fn get_rendered_with_request(
+        &self,
+        identifier: &str,
+        request: OutputGetRequest,
+    ) -> Result<String> {
+        let pack = self.resolve(identifier).await?;
+        let args = self.resolve_effective_get_args(&pack, request)?;
+
+        if let Some(required) = args.status_filter {
             if pack.status != required {
                 return Err(DomainError::InvalidState(format!(
                     "pack status is '{}', expected '{}'",
@@ -66,7 +168,101 @@ impl OutputUseCases {
             }
         }
 
-        self.render_pack(&pack).await
+        let regex = compile_match_regex(args.match_regex.as_deref())?;
+
+        if !args.paging_active && args.mode == OutputMode::Full && regex.is_none() {
+            return self.render_pack(&pack).await;
+        }
+
+        self.render_pack_advanced(&pack, &args, regex.as_ref())
+            .await
+    }
+
+    fn resolve_effective_get_args(
+        &self,
+        pack: &Pack,
+        request: OutputGetRequest,
+    ) -> Result<EffectiveGetArgs> {
+        if request.cursor.is_some() && request.offset.is_some() {
+            return Err(invalid_cursor(
+                "provide either 'offset' or 'cursor', not both",
+            ));
+        }
+
+        let default_mode = request.mode.unwrap_or_default();
+        let paging_requested =
+            request.limit.is_some() || request.offset.is_some() || request.cursor.is_some();
+
+        match request.cursor {
+            Some(raw_cursor) => {
+                let cursor = decode_cursor_v1(&raw_cursor)?;
+                if cursor.pack_id != pack.id.as_str() {
+                    return Err(invalid_cursor("pack id mismatch"));
+                }
+                if cursor.revision != pack.revision {
+                    return Err(invalid_cursor("pack revision changed"));
+                }
+
+                let effective_mode = request.mode.unwrap_or(cursor.mode);
+                let effective_status = request.status_filter.or(cursor.status_filter);
+                let effective_limit = request.limit.or(cursor.limit);
+                let effective_match = request.match_regex.or(cursor.match_regex);
+
+                if let Some(limit) = effective_limit {
+                    if limit == 0 {
+                        return Err(DomainError::InvalidData(
+                            "'limit' must be >= 1 when paging is active".into(),
+                        ));
+                    }
+                }
+
+                let fingerprint = request_fingerprint(
+                    effective_mode,
+                    effective_status,
+                    effective_limit,
+                    effective_match.as_deref(),
+                );
+                if cursor.fingerprint != fingerprint {
+                    return Err(invalid_cursor("request fingerprint mismatch"));
+                }
+
+                Ok(EffectiveGetArgs {
+                    status_filter: effective_status,
+                    mode: effective_mode,
+                    limit: effective_limit,
+                    start_offset: cursor.next_offset,
+                    match_regex: effective_match,
+                    paging_active: true,
+                    fingerprint,
+                })
+            }
+            None => {
+                if paging_requested {
+                    if let Some(limit) = request.limit {
+                        if limit == 0 {
+                            return Err(DomainError::InvalidData(
+                                "'limit' must be >= 1 when paging is active".into(),
+                            ));
+                        }
+                    }
+                }
+                let fingerprint = request_fingerprint(
+                    default_mode,
+                    request.status_filter,
+                    request.limit,
+                    request.match_regex.as_deref(),
+                );
+                Ok(EffectiveGetArgs {
+                    status_filter: request.status_filter,
+                    mode: default_mode,
+                    limit: request.limit,
+                    start_offset: request.offset.unwrap_or(0),
+                    match_regex: request.match_regex,
+                    paging_active: paging_requested,
+                    fingerprint,
+                })
+            }
+        }
     }
 
     async fn render_pack(&self, pack: &Pack) -> Result<String> {
@@ -74,30 +270,7 @@ impl OutputUseCases {
 
         // ── [LEGEND] ──────────────────────────────────────────────────────────
         out.push_str("[LEGEND]\n");
-        let title = pack
-            .title
-            .as_deref()
-            .or(pack.name.as_ref().map(|n| n.as_str()))
-            .unwrap_or("Untitled");
-        let _ = write!(out, "# Context pack: {}\n\n", title);
-        let _ = writeln!(out, "- id: {}", pack.id);
-        if let Some(name) = &pack.name {
-            let _ = writeln!(out, "- name: {}", name);
-        }
-        let _ = writeln!(out, "- status: {}", pack.status);
-        let _ = writeln!(out, "- revision: {}", pack.revision);
-        let _ = writeln!(out, "- expires_at: {}", pack.expires_at.to_rfc3339());
-        let _ = writeln!(
-            out,
-            "- ttl_remaining: {}",
-            pack.ttl_remaining_human(chrono::Utc::now())
-        );
-        if !pack.tags.is_empty() {
-            let _ = writeln!(out, "- tags: {}", pack.tags.join(", "));
-        }
-        if let Some(brief) = &pack.brief {
-            let _ = writeln!(out, "- brief: {}", brief);
-        }
+        write_legend_header(&mut out, pack);
 
         // ── [CONTENT] ─────────────────────────────────────────────────────────
         out.push_str("\n[CONTENT]\n");
@@ -151,6 +324,319 @@ impl OutputUseCases {
         }
 
         Ok(out)
+    }
+
+    async fn render_pack_advanced(
+        &self,
+        pack: &Pack,
+        args: &EffectiveGetArgs,
+        regex: Option<&Regex>,
+    ) -> Result<String> {
+        let mut chunks = self.collect_chunks(pack, args.mode).await?;
+
+        if let Some(matcher) = regex {
+            chunks.retain(|chunk| matcher.is_match(&chunk.searchable_text));
+        }
+
+        let total_chunks = chunks.len();
+        let start = args.start_offset.min(total_chunks);
+        let end = match args.limit {
+            Some(limit) => start.saturating_add(limit).min(total_chunks),
+            None => total_chunks,
+        };
+        let page_chunks = &chunks[start..end];
+
+        let has_more = end < total_chunks;
+        let next_cursor = if args.paging_active && has_more {
+            Some(encode_cursor_v1(&OutputCursorV1 {
+                v: 1,
+                pack_id: pack.id.as_str().to_string(),
+                revision: pack.revision,
+                next_offset: end,
+                fingerprint: args.fingerprint.clone(),
+                mode: args.mode,
+                status_filter: args.status_filter,
+                limit: args.limit,
+                match_regex: args.match_regex.clone(),
+            })?)
+        } else {
+            None
+        };
+
+        let mut out = String::with_capacity(2048);
+        out.push_str("[LEGEND]\n");
+        write_legend_header(&mut out, pack);
+        if args.mode == OutputMode::Compact {
+            let _ = writeln!(out, "- mode: compact");
+        }
+        if let Some(pattern) = &args.match_regex {
+            let _ = writeln!(out, "- match: {}", pattern);
+        }
+        if args.paging_active {
+            let _ = writeln!(out, "- paging: active");
+            let _ = writeln!(out, "- offset: {}", start);
+            match args.limit {
+                Some(limit) => {
+                    let _ = writeln!(out, "- limit: {}", limit);
+                }
+                None => {
+                    let _ = writeln!(out, "- limit: all");
+                }
+            }
+            let _ = writeln!(
+                out,
+                "- has_more: {}",
+                if has_more { "true" } else { "false" }
+            );
+            let _ = writeln!(out, "- next: {}", next_cursor.as_deref().unwrap_or("null"));
+            let _ = writeln!(out, "- chunks_total: {}", total_chunks);
+            let _ = writeln!(out, "- chunks_returned: {}", page_chunks.len());
+        }
+
+        out.push_str("\n[CONTENT]\n");
+
+        let mut current_section_key: Option<&str> = None;
+        let mut current_group: Option<&str> = None;
+        let mut diagrams_open = false;
+
+        for chunk in page_chunks {
+            if current_section_key != Some(chunk.section_key.as_str()) {
+                current_section_key = Some(chunk.section_key.as_str());
+                current_group = None;
+                diagrams_open = false;
+
+                let _ = write!(
+                    out,
+                    "\n## {} [{}]\n",
+                    chunk.section_title, chunk.section_key
+                );
+                if let Some(desc) = &chunk.section_description {
+                    let _ = write!(out, "\n{}\n", desc);
+                }
+            }
+
+            match &chunk.kind {
+                ChunkKind::Ref { group } => {
+                    if current_group != Some(group.as_str()) {
+                        let _ = write!(out, "\n### group: {}\n", group);
+                        current_group = Some(group.as_str());
+                    }
+                    out.push_str(&chunk.body_markdown);
+                }
+                ChunkKind::Diagram => {
+                    if !diagrams_open {
+                        out.push_str("\n### Diagrams\n");
+                        diagrams_open = true;
+                        current_group = None;
+                    }
+                    out.push_str(&chunk.body_markdown);
+                }
+            }
+        }
+
+        if page_chunks.is_empty() {
+            out.push_str("\n_No chunks matched current filters._\n");
+        }
+
+        Ok(out)
+    }
+
+    async fn collect_chunks(&self, pack: &Pack, mode: OutputMode) -> Result<Vec<RenderChunk>> {
+        let mut chunks = Vec::new();
+
+        for section in &pack.sections {
+            let section_key = section.key.as_str().to_string();
+            let section_title = section.title.clone();
+            let section_description = section.description.clone();
+
+            let groups = Pack::refs_grouped_in_section(section);
+            for (group_name, refs) in &groups {
+                for r in refs {
+                    let mut body_markdown = String::new();
+                    let mut searchable_text = String::new();
+
+                    let _ = write!(body_markdown, "\n#### {} [{}]\n", r.key, section.key);
+                    if let Some(t) = &r.title {
+                        let _ = write!(body_markdown, "**{}**\n\n", t);
+                        let _ = writeln!(searchable_text, "{}", t);
+                    }
+                    let _ = writeln!(body_markdown, "- path: {}", r.path);
+                    let _ = writeln!(body_markdown, "- lines: {}-{}", r.lines.start, r.lines.end);
+                    let _ = writeln!(searchable_text, "{}", r.path);
+                    let _ = writeln!(searchable_text, "{}-{}", r.lines.start, r.lines.end);
+                    if let Some(why) = &r.why {
+                        let _ = writeln!(body_markdown, "- why: {}", why);
+                        let _ = writeln!(searchable_text, "{}", why);
+                    }
+
+                    match self.excerpt.read_lines(&r.path, r.lines).await {
+                        Ok(snippet) => {
+                            let _ = writeln!(searchable_text, "{}", snippet.body);
+                            if mode == OutputMode::Full {
+                                let lang = lang_from_path(r.path.as_str());
+                                let _ =
+                                    write!(body_markdown, "\n```{}\n{}\n```\n", lang, snippet.body);
+                            }
+                        }
+                        Err(DomainError::StaleRef(msg)) => {
+                            let _ = write!(body_markdown, "\n> stale ref: {}\n", msg);
+                            let _ = writeln!(searchable_text, "{}", msg);
+                        }
+                        Err(e) => return Err(e),
+                    }
+
+                    chunks.push(RenderChunk {
+                        section_title: section_title.clone(),
+                        section_key: section_key.clone(),
+                        section_description: section_description.clone(),
+                        kind: ChunkKind::Ref {
+                            group: group_name.clone(),
+                        },
+                        body_markdown,
+                        searchable_text,
+                    });
+                }
+            }
+
+            for diagram in &section.diagrams {
+                let mut body_markdown = String::new();
+                let mut searchable_text = String::new();
+
+                let _ = write!(body_markdown, "\n#### {}\n", diagram.title);
+                let _ = writeln!(searchable_text, "{}", diagram.title);
+                if let Some(why) = &diagram.why {
+                    let _ = write!(body_markdown, "_{}_\n\n", why);
+                    let _ = writeln!(searchable_text, "{}", why);
+                }
+                let _ = write!(body_markdown, "```mermaid\n{}\n```\n", diagram.mermaid);
+                let _ = writeln!(searchable_text, "{}", diagram.mermaid);
+
+                chunks.push(RenderChunk {
+                    section_title: section_title.clone(),
+                    section_key: section_key.clone(),
+                    section_description: section_description.clone(),
+                    kind: ChunkKind::Diagram,
+                    body_markdown,
+                    searchable_text,
+                });
+            }
+        }
+
+        Ok(chunks)
+    }
+}
+
+fn compile_match_regex(pattern: Option<&str>) -> Result<Option<Regex>> {
+    let Some(pattern) = pattern else {
+        return Ok(None);
+    };
+    Regex::new(pattern)
+        .map(Some)
+        .map_err(|e| DomainError::InvalidData(format!("invalid regex in 'match': {}", e)))
+}
+
+fn write_legend_header(out: &mut String, pack: &Pack) {
+    let title = pack
+        .title
+        .as_deref()
+        .or(pack.name.as_ref().map(|n| n.as_str()))
+        .unwrap_or("Untitled");
+    let _ = write!(out, "# Context pack: {}\n\n", title);
+    let _ = writeln!(out, "- id: {}", pack.id);
+    if let Some(name) = &pack.name {
+        let _ = writeln!(out, "- name: {}", name);
+    }
+    let _ = writeln!(out, "- status: {}", pack.status);
+    let _ = writeln!(out, "- revision: {}", pack.revision);
+    let _ = writeln!(out, "- expires_at: {}", pack.expires_at.to_rfc3339());
+    let _ = writeln!(
+        out,
+        "- ttl_remaining: {}",
+        pack.ttl_remaining_human(chrono::Utc::now())
+    );
+    if !pack.tags.is_empty() {
+        let _ = writeln!(out, "- tags: {}", pack.tags.join(", "));
+    }
+    if let Some(brief) = &pack.brief {
+        let _ = writeln!(out, "- brief: {}", brief);
+    }
+}
+
+fn invalid_cursor(reason: impl Into<String>) -> DomainError {
+    DomainError::InvalidData(format!("invalid_cursor: {}", reason.into()))
+}
+
+fn request_fingerprint(
+    mode: OutputMode,
+    status_filter: Option<Status>,
+    limit: Option<usize>,
+    match_regex: Option<&str>,
+) -> String {
+    format!(
+        "mode={}|status={}|limit={}|match={}",
+        mode,
+        status_filter
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        limit
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        match_regex.unwrap_or("-")
+    )
+}
+
+fn encode_cursor_v1(cursor: &OutputCursorV1) -> Result<String> {
+    let raw = serde_json::to_vec(cursor)
+        .map_err(|e| invalid_cursor(format!("serialization error: {}", e)))?;
+    Ok(format!("v1:{}", hex_encode(&raw)))
+}
+
+fn decode_cursor_v1(raw: &str) -> Result<OutputCursorV1> {
+    let hex = raw
+        .strip_prefix("v1:")
+        .ok_or_else(|| invalid_cursor("unsupported version"))?;
+    let bytes = hex_decode(hex).map_err(invalid_cursor)?;
+    let cursor: OutputCursorV1 =
+        serde_json::from_slice(&bytes).map_err(|_| invalid_cursor("malformed payload"))?;
+    if cursor.v != 1 {
+        return Err(invalid_cursor("unsupported version"));
+    }
+    Ok(cursor)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(&mut out, "{:02x}", byte);
+    }
+    out
+}
+
+fn hex_decode(raw: &str) -> std::result::Result<Vec<u8>, String> {
+    if !raw.len().is_multiple_of(2) {
+        return Err("hex length must be even".into());
+    }
+
+    let mut out = Vec::with_capacity(raw.len() / 2);
+    let bytes = raw.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let hi = decode_hex_digit(bytes[idx])
+            .ok_or_else(|| format!("invalid hex digit '{}'", bytes[idx] as char))?;
+        let lo = decode_hex_digit(bytes[idx + 1])
+            .ok_or_else(|| format!("invalid hex digit '{}'", bytes[idx + 1] as char))?;
+        out.push((hi << 4) | lo);
+        idx += 2;
+    }
+    Ok(out)
+}
+
+fn decode_hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 

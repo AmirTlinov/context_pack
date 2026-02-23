@@ -195,6 +195,38 @@ fn payload_pack_revision(payload: &Value) -> Result<u64> {
         .context("missing payload.revision")
 }
 
+fn output_markdown(response: &Value) -> Result<&str> {
+    response
+        .get("result")
+        .and_then(|r| r.get("content"))
+        .and_then(|v| v.get(0))
+        .and_then(|v| v.get("text"))
+        .and_then(Value::as_str)
+        .context("missing rendered markdown output")
+}
+
+fn legend_value(markdown: &str, key: &str) -> Option<String> {
+    let prefix = format!("- {}: ", key);
+    markdown
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&prefix).map(str::to_string))
+}
+
+fn rendered_ref_keys(markdown: &str) -> Vec<String> {
+    markdown
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("#### ")?;
+            let (key, _) = rest.split_once(" [")?;
+            if key.starts_with("ref-") {
+                Some(key.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
     let dir = tempdir()?;
@@ -690,6 +722,217 @@ async fn e2e_notification_without_id_produces_no_response() -> Result<()> {
 
         assert_eq!(ping["id"], 2);
         assert!(ping["result"].is_object());
+        Ok(())
+    }
+    .await;
+
+    client.stop().await?;
+    result
+}
+
+#[tokio::test]
+async fn e2e_output_get_supports_mode_match_paging_and_cursor() -> Result<()> {
+    let dir = tempdir()?;
+    let storage_root = dir.path().join("storage");
+    let source_root = dir.path().join("source");
+    tokio::fs::create_dir_all(&storage_root).await?;
+    tokio::fs::create_dir_all(&source_root).await?;
+    tokio::fs::write(
+        source_root.join("flow.rs"),
+        "fn a() { let token = \"TOKEN_01\"; }\nfn b() { let token = \"TOKEN_02\"; }\nfn c() { let token = \"TOKEN_03\"; }\n",
+    )
+    .await?;
+
+    let mut client = McpE2EClient::spawn(&storage_root, &source_root).await?;
+
+    let result: Result<()> = async {
+        let _ = client
+            .call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .await?;
+
+        let created = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"create",
+                        "name":"paging-e2e-pack",
+                        "ttl_minutes": 60
+                    }
+                }
+            }))
+            .await?;
+        let created_payload = parse_tool_payload(&created)?;
+        let pack_id = created_payload["payload"]["id"]
+            .as_str()
+            .context("missing created pack id")?
+            .to_string();
+        let mut revision = payload_pack_revision(&created_payload)?;
+
+        let section = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":3,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"upsert_section",
+                        "id": pack_id.clone(),
+                        "expected_revision": revision,
+                        "section_key":"flow",
+                        "section_title":"Flow"
+                    }
+                }
+            }))
+            .await?;
+        revision = payload_pack_revision(&parse_tool_payload(&section)?)?;
+
+        for (idx, line_no) in [(1_u32, 1_u32), (2, 2), (3, 3)] {
+            let updated = client
+                .call(json!({
+                    "jsonrpc":"2.0",
+                    "id": format!("ref-{}", idx),
+                    "method":"tools/call",
+                    "params":{
+                        "name":"input",
+                        "arguments":{
+                            "action":"upsert_ref",
+                            "id": pack_id.clone(),
+                            "expected_revision": revision,
+                            "section_key":"flow",
+                            "ref_key": format!("ref-0{}", idx),
+                            "path":"flow.rs",
+                            "line_start": line_no,
+                            "line_end": line_no
+                        }
+                    }
+                }))
+                .await?;
+            revision = payload_pack_revision(&parse_tool_payload(&updated)?)?;
+        }
+        assert!(revision >= 5);
+
+        let page1 = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":7,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"get",
+                        "id": pack_id.clone(),
+                        "mode":"compact",
+                        "match":"TOKEN_0[12]",
+                        "limit":1
+                    }
+                }
+            }))
+            .await?;
+        let markdown1 = output_markdown(&page1)?;
+        assert!(!markdown1.contains("```rust"));
+        assert_eq!(legend_value(markdown1, "has_more").as_deref(), Some("true"));
+        let next = legend_value(markdown1, "next")
+            .filter(|value| value != "null")
+            .context("missing next cursor on first page")?;
+        assert_eq!(rendered_ref_keys(markdown1), vec!["ref-01"]);
+
+        let page2 = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":8,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"get",
+                        "id": pack_id,
+                        "cursor": next
+                    }
+                }
+            }))
+            .await?;
+        let markdown2 = output_markdown(&page2)?;
+        assert_eq!(
+            legend_value(markdown2, "has_more").as_deref(),
+            Some("false")
+        );
+        assert_eq!(legend_value(markdown2, "next").as_deref(), Some("null"));
+        assert_eq!(rendered_ref_keys(markdown2), vec!["ref-02"]);
+        assert!(!markdown2.contains("ref-03"));
+
+        Ok(())
+    }
+    .await;
+
+    client.stop().await?;
+    result
+}
+
+#[tokio::test]
+async fn e2e_output_get_invalid_regex_returns_validation_error() -> Result<()> {
+    let dir = tempdir()?;
+    let storage_root = dir.path().join("storage");
+    let source_root = dir.path().join("source");
+    tokio::fs::create_dir_all(&storage_root).await?;
+    tokio::fs::create_dir_all(&source_root).await?;
+
+    let mut client = McpE2EClient::spawn(&storage_root, &source_root).await?;
+
+    let result: Result<()> = async {
+        let _ = client
+            .call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .await?;
+
+        let created = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"create",
+                        "name":"regex-e2e-pack",
+                        "ttl_minutes": 60
+                    }
+                }
+            }))
+            .await?;
+        let created_payload = parse_tool_payload(&created)?;
+        let pack_id = created_payload["payload"]["id"]
+            .as_str()
+            .context("missing created pack id")?
+            .to_string();
+
+        let response = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":3,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"get",
+                        "id": pack_id,
+                        "match":"[broken"
+                    }
+                }
+            }))
+            .await?;
+
+        assert_eq!(response["result"]["isError"], true);
+        let err_payload = parse_tool_payload(&response)?;
+        assert_eq!(err_payload["kind"], "validation");
+        assert_eq!(err_payload["code"], "invalid_data");
+        assert!(err_payload["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid regex"));
         Ok(())
     }
     .await;

@@ -67,7 +67,14 @@ pub(super) fn tools_schema() -> Value {
                             "enum": ["draft", "finalized"],
                             "description": "Optional status filter (for list and get)"
                         },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["full", "compact"],
+                            "description": "Render mode for output get (default: full)"
+                        },
                         "query": { "type": "string", "description": "Optional text search for list" },
+                        "cursor": { "type": "string", "description": "Opaque cursor returned by output get paging metadata" },
+                        "match": { "type": "string", "description": "Regex filter applied to output get chunks" },
                         "limit": { "type": "integer" },
                         "offset": { "type": "integer" }
                     }
