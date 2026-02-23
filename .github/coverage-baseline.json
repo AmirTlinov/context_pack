@@ -1,0 +1,5 @@
+{
+  "line_coverage_percent": 72.15,
+  "measurement_note": "Baseline captured from baseline CI-safe command on 2026-02-23",
+  "measurement_command": "scripts/check_coverage_baseline.sh"
+}
