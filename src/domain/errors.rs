@@ -14,8 +14,11 @@ pub enum DomainError {
     #[error("conflict: {0}")]
     Conflict(String),
 
-    #[error("ambiguous: {0}")]
-    Ambiguous(String),
+    #[error("ambiguous: {message}")]
+    Ambiguous {
+        message: String,
+        candidates: Vec<String>,
+    },
 
     #[error("revision conflict: expected {expected}, actual {actual}")]
     RevisionConflict { expected: u64, actual: u64 },
