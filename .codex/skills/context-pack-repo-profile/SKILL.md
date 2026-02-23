@@ -54,14 +54,19 @@ description: "Проектный профиль по работе с context_pac
 1. `input(list)` (по возможности через query) и/или `output(list)` → зафиксировать стартовый набор
 2. `input(create)` или `input(get)` → получить `revision`.
 3. Вносить факт-секции (`upsert_section`, `upsert_ref`) с anchors.
-4. На рисках High/Critical требуются минимум:
+4. Подготовить обязательные артефакты для release/мержа:
+   - `pack_id` (finalized),
+   - `review`-comment URL,
+   - `review` verdict (`PASS`/`BLOCKED`),
+   - `@codex` статус: optional/non-blocking (информационный).
+5. На рисках High/Critical требуются минимум:
    - два anchors **или**
    - один anchor + независимая контрпроверка.
-5. Перед финишем: `output(get)` и QA gate.
-6. Set status:
+6. Перед финишем: `output(get)` и QA gate.
+7. Set status:
    - `finalized` при полной воспроизводимости;
    - иначе `draft` + `gaps`.
-7. Перед закрытием issue добавить `PR`, `pack_id`, AC mapping.
+8. Перед закрытием issue добавить `PR`, `pack_id`, AC mapping.
 
 ---
 
@@ -69,6 +74,8 @@ description: "Проектный профиль по работе с context_pac
 
 - `global skills` обновлён — да/нет.
 - `repo-local profile` добавлен — да/нет.
+- `global review loop` соблюдён (обязательный `review` loop + `pack_id` + `review comment` URL + `PASS/BLOCKED`).
+- `@codex` учтён как optional/non-blocking — да/нет.
 - Указаны новые output/get параметры (`compact|full`, `limit|offset|cursor|next`, `match`).
 - QA handoff дисциплина соблюдена (`pack_id + summary`).
 - Тест-гейт выполнен: `cargo fmt --check && cargo test --all-targets --all-features`.
