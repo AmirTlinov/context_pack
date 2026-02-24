@@ -2449,3 +2449,273 @@ async fn e2e_freshness_metadata_filters_and_warnings() -> Result<()> {
     client.stop().await?;
     result
 }
+
+#[tokio::test]
+async fn e2e_multi_agent_handoff_compact_full_and_stale_path() -> Result<()> {
+    let dir = tempdir()?;
+    let storage_root = dir.path().join("storage");
+    let source_root = dir.path().join("source");
+    tokio::fs::create_dir_all(&storage_root).await?;
+    tokio::fs::create_dir_all(&source_root).await?;
+    tokio::fs::write(
+        source_root.join("handoff.rs"),
+        "fn auth() {\n  let evidence_token = \"E2E\";\n  let reviewer_hint = true;\n}\n",
+    )
+    .await?;
+
+    let mut client = McpE2EClient::spawn(&storage_root, &source_root).await?;
+
+    let result: Result<()> = async {
+        let _ = client
+            .call(json!({"jsonrpc":"2.0","id":"init","method":"initialize","params":{}}))
+            .await?;
+
+        // Explorer publishes pack with finalizable minimum evidence.
+        let created = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":"create-main-pack",
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"create",
+                        "name":"multi-agent-handoff-pack",
+                        "title":"Multi-agent handoff",
+                        "brief":"Explorer to orchestrator/reviewer",
+                        "ttl_minutes":120
+                    }
+                }
+            }))
+            .await?;
+        let created_payload = parse_tool_payload(&created)?;
+        let pack_id = created_payload["payload"]["id"]
+            .as_str()
+            .context("missing primary pack id")?
+            .to_string();
+        let mut revision = payload_pack_revision(&created_payload)?;
+
+        let scope = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":"scope",
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"upsert_section",
+                        "id":pack_id.clone(),
+                        "expected_revision":revision,
+                        "section_key":"scope",
+                        "section_title":"Scope",
+                        "section_description":"explorer coverage"
+                    }
+                }
+            }))
+            .await?;
+        revision = payload_pack_revision(&parse_tool_payload(&scope)?)?;
+
+        let findings = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":"findings",
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"upsert_section",
+                        "id":pack_id.clone(),
+                        "expected_revision":revision,
+                        "section_key":"findings",
+                        "section_title":"Findings",
+                        "section_description":"auth evidence"
+                    }
+                }
+            }))
+            .await?;
+        revision = payload_pack_revision(&parse_tool_payload(&findings)?)?;
+
+        let finding_ref = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":"finding-ref",
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"upsert_ref",
+                        "id":pack_id.clone(),
+                        "expected_revision":revision,
+                        "section_key":"findings",
+                        "ref_key":"auth-ref",
+                        "path":"handoff.rs",
+                        "line_start":1,
+                        "line_end":4
+                    }
+                }
+            }))
+            .await?;
+        revision = payload_pack_revision(&parse_tool_payload(&finding_ref)?)?;
+
+        let qa = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":"qa",
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"upsert_section",
+                        "id":pack_id.clone(),
+                        "expected_revision":revision,
+                        "section_key":"qa",
+                        "section_title":"QA",
+                        "section_description":"verdict: pass"
+                    }
+                }
+            }))
+            .await?;
+        revision = payload_pack_revision(&parse_tool_payload(&qa)?)?;
+
+        let finalized = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":"finalize",
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"set_status",
+                        "id":pack_id.clone(),
+                        "expected_revision":revision,
+                        "status":"finalized"
+                    }
+                }
+            }))
+            .await?;
+        let finalized_payload = parse_tool_payload(&finalized)?;
+        assert_eq!(
+            finalized_payload["payload"]["status"],
+            Value::String("finalized".into())
+        );
+
+        // Orchestrator consumes compact handoff for routing decisions.
+        let compact = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":"orchestrator-read",
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"get",
+                        "id":pack_id.clone()
+                    }
+                }
+            }))
+            .await?;
+        let compact_markdown = output_markdown(&compact)?;
+        assert!(compact_markdown.contains("- mode: compact"));
+        assert!(compact_markdown.contains("## Handoff summary [handoff]"));
+        assert!(compact_markdown.contains("- deep_nav_hints:"));
+        assert!(
+            !compact_markdown.contains("```rust"),
+            "compact routing view should avoid full code snippets"
+        );
+
+        // Reviewer consumes full evidence.
+        let full = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":"reviewer-read",
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"get",
+                        "id":pack_id.clone(),
+                        "mode":"full"
+                    }
+                }
+            }))
+            .await?;
+        let full_markdown = output_markdown(&full)?;
+        assert!(full_markdown.contains("```rust"));
+        assert!(full_markdown.contains("evidence_token = \"E2E\""));
+
+        // Explicit stale-pack path handling.
+        let stale_created = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":"create-stale-pack",
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"create",
+                        "name":"multi-agent-stale-pack",
+                        "ttl_minutes":120
+                    }
+                }
+            }))
+            .await?;
+        let stale_payload = parse_tool_payload(&stale_created)?;
+        let stale_id = stale_payload["payload"]["id"]
+            .as_str()
+            .context("missing stale pack id")?
+            .to_string();
+
+        let stale_path = storage_root.join("packs").join(format!("{stale_id}.json"));
+        let stale_raw = std::fs::read_to_string(&stale_path)?;
+        let mut stale_json: Value = serde_json::from_str(&stale_raw)?;
+        stale_json["expires_at"] = Value::String((Utc::now() - Duration::seconds(5)).to_rfc3339());
+        std::fs::write(stale_path, serde_json::to_string(&stale_json)?)?;
+
+        let output_default = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":"stale-default-list",
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{"action":"list"}
+                }
+            }))
+            .await?;
+        let default_markdown = output_markdown(&output_default)?;
+        assert!(
+            !default_markdown.contains(&stale_id),
+            "stale-safe default list should hide expired pack"
+        );
+
+        let output_expired = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":"stale-expired-list",
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"list",
+                        "freshness":"expired"
+                    }
+                }
+            }))
+            .await?;
+        let expired_markdown = output_markdown(&output_expired)?;
+        assert!(
+            expired_markdown.contains(&stale_id),
+            "explicit freshness=expired list should surface stale pack"
+        );
+        assert!(
+            expired_markdown.contains("warning: expired"),
+            "stale path should be explicit in human-readable output"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    client.stop().await?;
+    result
+}
