@@ -277,11 +277,15 @@ Use this quick map when upgrading clients from pre-#58 behavior.
     `missing_sections`, `missing_fields`, `invalid_refs`.
 
 4) **#61 compact handoff-first default output**
-- Before: `output get` default often returned full heavy markdown for routing decisions.
+- Before (v2): `output get` default often returned full heavy markdown for routing decisions.
 - After:
-  - default `output get` is bounded compact handoff (`mode=compact`, `limit=6`),
+  - default `output read` is bounded compact handoff (`profile=orchestrator`, `limit=6`),
   - compact provides objective/scope/verdict/risks/gaps/deep-nav hints,
-  - reviewer drill-down stays available via `mode=full`.
+  - reviewer drill-down stays available via `profile=reviewer`.
+
+  - Migration:
+    - `{ "action":"get", "id":"pk_abcd2345" }` -> `{ "action":"read", "id":"pk_abcd2345" }`
+    - `{ "action":"get", "id":"pk_abcd2345", "mode":"full" }` -> `{ "action":"read", "id":"pk_abcd2345", "profile":"reviewer" }`
 
 5) **#62 actionable revision conflict diagnostics**
 - Before: conflict details were minimal (expected vs actual only).
@@ -295,7 +299,7 @@ Use this quick map when upgrading clients from pre-#58 behavior.
   3. retry with fresh `expected_revision`.
 
 6) **#73 S3 output read profiles + page_token**
-- Before: clients used `output get` with `mode`, `cursor`, and regex `match`.
+- Before (v2): clients used `output get` with `mode`, `cursor`, and regex `match`.
 - After:
   - output contract is `action=read` with profile routing:
     - `orchestrator` (default compact bounded),
@@ -307,6 +311,8 @@ Use this quick map when upgrading clients from pre-#58 behavior.
   - `{ "action":"read", "id":"pk_abcd2345" }`,
   - `{ "action":"read", "id":"pk_abcd2345", "profile":"reviewer" }`,
   - `{ "action":"read", "id":"pk_abcd2345", "page_token":"<token>" }`.
+  - legacy `{ "action":"get", "id":"pk_abcd2345", "mode":"full", "cursor":"<cursor>", "match":"TODO" }` ->
+    `{ "action":"read", "id":"pk_abcd2345", "profile":"reviewer", "page_token":"<page_token>", "contains":"TODO" }`.
 
 ---
 
@@ -463,7 +469,7 @@ In successful output LEGEND, inspect:
 
 1. Агент создаёт/обновляет пакет через `input`.
 2. Добавляет секции, якоря кода, комментарии, диаграммы.
-3. Вызывает `output get`.
+3. Вызывает `output read`.
 4. Оркестратор получает `pack_id + короткий summary` и открывает один полный markdown-пакет.
 
 ---
@@ -609,36 +615,36 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 - Все мутации, кроме `create` и `delete_pack`, требуют `expected_revision`.
 - `create` требует `ttl_minutes`.
 - `touch_ttl` принимает строго одно: `ttl_minutes` или `extend_minutes`.
-- `output` остаётся с actions только `list|get` (без разрастания API).
+- `output` остаётся с actions только `list|read` (без разрастания API).
 - `input list` и `output list` принимают опциональный фильтр `freshness`:
   - `fresh`
   - `expiring_soon`
   - `expired`
 - Поведение list по умолчанию stale-safe: expired-пакеты скрыты, пока явно не запрошен `freshness=expired`.
 - Истёкшие пакеты видны через `freshness=expired` в течение окна `CONTEXT_PACK_EXPIRED_GRACE_SECONDS` (по умолчанию `900`), после чего считаются отсутствующими.
-- Дополнительные аргументы `output get`: `mode(full|compact)`, `limit`, `offset`, `cursor`, `match` (regex).
-- По умолчанию `output get` отдаёт **compact handoff-first страницу** (`mode=compact`, bounded `limit=6`), чтобы оркестратор принимал решение без перегруза.
+- Дополнительные аргументы `output read`: `profile(orchestrator|reviewer|executor)`, `limit`, `offset`, `page_token`, `contains`.
+- По умолчанию `output read` отдаёт **compact handoff-first страницу** (`profile=orchestrator`, bounded `limit=6`), чтобы оркестратор принимал решение без перегруза.
 - Compact handoff включает: objective/scope, verdict/status, top risks/gaps, freshness и deep-nav hints.
-- Для полного ревью используйте `mode=full` (полные refs/anchors/snippets).
-- В list/get добавлена нормализованная freshness-мета в стабильной форме:
+- Для полного ревью используйте `profile=reviewer` (полные refs/anchors/snippets).
+- В list/read добавлена нормализованная freshness-мета в стабильной форме:
   - `freshness_state`
   - `expires_at`
   - `ttl_remaining`
-- В человекочитаемом выводе (`output list|get`) добавляются краткие предупреждения для `expiring_soon` и `expired`.
-- Детерминированное разрешение `output get(name=...)`:
+- В человекочитаемом выводе (`output list|read`) добавляются краткие предупреждения для `expiring_soon` и `expired`.
+- Детерминированное разрешение `output read(name=...)`:
   1. приоритет `finalized` над не-finalized;
   2. внутри выбранного статуса — максимальный `updated_at`;
   3. при равенстве — максимальный `revision`;
   4. если ничья осталась — fail-closed: `ambiguous` + `details.candidate_ids`.
-- Успешный `output get` добавляет в LEGEND метаданные выбора:
+- Успешный `output read` добавляет в LEGEND метаданные выбора:
   - `selected_by`
   - `selected_revision`
   - `selected_status`
-- `mode=compact` сохраняет метаданные ref и stale-маркеры, но убирает code fences у ref.
-- По умолчанию compact handoff bounded (`limit=6`, если не указан) и отдаёт `next` для drill-down.
-- Paging-контракт: `limit` + (`offset` для первой страницы или `cursor` для продолжения) с детерминированными `has_more` и `next` в LEGEND.
-- Cursor fail-closed: при stale/mismatch возвращается `invalid_data` с семантикой `invalid_cursor` в message.
-- Невалидный regex в `match` возвращает validation error (`invalid_data`) с явной причиной.
+- compact handoff сохраняет метаданные ref и stale-маркеры, но убирает code fences у ref.
+- По умолчанию compact handoff bounded (`limit=6`, если не указан) и отдаёт `next_page_token` для drill-down.
+- Paging-контракт: `limit` + (`offset` для первой страницы или `page_token` для продолжения) с детерминированными `has_more` и `next_page_token` в LEGEND.
+- `page_token` fail-closed: при stale/mismatch возвращается `invalid_data` с семантикой `invalid_page_token` в message.
+- Невалидный `contains` возвращает validation error (`invalid_data`) с явной причиной.
 - `output` всегда markdown (`format` отклоняется).
 
 ### Finalize checklist (fail-closed)
@@ -686,11 +692,16 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
     `missing_sections`, `missing_fields`, `invalid_refs`.
 
 4) **#61 compact handoff-first дефолтный output**
-- До: `output get` по умолчанию часто возвращал тяжёлый full markdown даже для routing.
+- До (v2): `output get` по умолчанию часто возвращал тяжёлый full markdown даже для routing.
 - После:
-  - дефолтный `output get` — bounded compact handoff (`mode=compact`, `limit=6`),
+  - дефолтный `output read` — bounded compact handoff (`profile=orchestrator`, `limit=6`),
   - compact даёт objective/scope/verdict/risks/gaps/deep-nav hints,
-  - reviewer drill-down остаётся через `mode=full`.
+  - reviewer drill-down остаётся через `profile=reviewer`.
+
+   Миграция:
+  - `{ "action":"get", "id":"pk_abcd2345" }` -> `{ "action":"read", "id":"pk_abcd2345" }`
+  - `{ "action":"get", "id":"pk_abcd2345", "mode":"full" }` ->
+    `{ "action":"read", "id":"pk_abcd2345", "profile":"reviewer" }`
 
 5) **#62 диагностируемые revision-конфликты**
 - До: детали конфликта были минимальными (только expected/actual).
@@ -740,7 +751,7 @@ Compact handoff-first чтение (по умолчанию, bounded):
 {
   "name": "output",
   "arguments": {
-    "action": "get",
+    "action": "read",
     "id": "pk_abcd2345"
   }
 }
@@ -752,9 +763,9 @@ Compact handoff-first чтение (по умолчанию, bounded):
 {
   "name": "output",
   "arguments": {
-    "action": "get",
+    "action": "read",
     "id": "pk_abcd2345",
-    "mode": "full"
+    "profile": "reviewer"
   }
 }
 ```
@@ -765,9 +776,9 @@ Compact handoff-first чтение (по умолчанию, bounded):
 {
   "name": "output",
   "arguments": {
-    "action": "get",
+    "action": "read",
     "id": "pk_abcd2345",
-    "cursor": "<next-from-legend>"
+    "page_token": "<next_page_token>"
   }
 }
 ```
@@ -789,6 +800,6 @@ Compact handoff-first чтение (по умолчанию, bounded):
 - `selected_revision`
 - `selected_status`
 - `freshness_state` / `expires_at` / `ttl_remaining` (+ `warning`, когда есть риск stale)
-- `next` (для продолжения compact handoff paging)
+- `next_page_token` (для продолжения compact handoff paging)
 
 </details>
