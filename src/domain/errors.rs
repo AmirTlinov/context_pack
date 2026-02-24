@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 pub const REVISION_CONFLICT_CHANGED_KEYS_LIMIT: usize = 12;
@@ -32,6 +33,9 @@ pub fn revision_conflict_guidance(current_revision: u64) -> String {
 pub enum DomainError {
     #[error("invalid data: {0}")]
     InvalidData(String),
+
+    #[error("{message}")]
+    DetailedInvalidData { message: String, details: Value },
 
     #[error("ttl required: {0}")]
     TtlRequired(String),

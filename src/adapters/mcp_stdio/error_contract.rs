@@ -7,7 +7,18 @@ use crate::domain::errors::DomainError;
 pub(super) fn domain_error_response(id: Value, err: &DomainError) -> RpcEnvelope {
     let (kind, code, details) = match err {
         DomainError::InvalidData(_) => ("validation", "invalid_data", Value::Null),
-        DomainError::TtlRequired(_) => ("validation", "ttl_required", Value::Null),
+        DomainError::DetailedInvalidData {
+            details,
+            message: _,
+        } => ("validation", "invalid_data", details.clone()),
+        DomainError::TtlRequired(_) => (
+            "validation",
+            "ttl_required",
+            json!({
+                "required_fields": ["ttl_minutes", "extend_minutes"],
+                "required_mode_hint": "exactly_one_of",
+            }),
+        ),
         DomainError::NotFound(_) => ("not_found", "not_found", Value::Null),
         DomainError::Conflict(_) => ("conflict", "conflict", Value::Null),
         DomainError::Ambiguous { candidates, .. } => (

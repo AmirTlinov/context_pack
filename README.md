@@ -215,6 +215,23 @@ CONTEXT_PACK_EXPIRED_GRACE_SECONDS = "900"
 - `contains` performs deterministic case-insensitive substring matching over rendered chunk text.
 - `output` is always markdown (`format` is rejected).
 
+### Error contract (v3)
+
+For v3 validation failures (`code=invalid_data`), payloads are normalized and stable:
+
+- `kind`: always `validation`
+- `code`: always `invalid_data`
+- `details`: deterministic machine-readable guidance, including:
+  - requested/legacy fields (`requested_action`, `requested_field`, `supported_field`, etc.),
+  - allowed replacement sets (`allowed_actions`, `allowed_ops`),
+  - and required inputs (`required_fields`, `mutually_interchangeable`).
+- `message`: concise human-readable summary that mirrors the same intent as `details`.
+
+Examples:
+
+- `input`/`output` legacy action or field usage returns actionable guidance (`action='write'`, `use action='read'`, `unsupported_field` + `supported_field`).
+- `input delete` and `output read` report required identifier keys explicitly (`id`/`name`).
+
 ### Finalize checklist (fail-closed)
 
 Before setting `status=finalized`, ensure:
