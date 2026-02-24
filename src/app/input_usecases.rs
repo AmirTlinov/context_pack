@@ -6,7 +6,10 @@ use crate::{
         resolver::resolve_pack,
     },
     domain::{
-        errors::{DomainError, FinalizeRefIssue, Result},
+        errors::{
+            revision_conflict_guidance, DomainError, FinalizeRefIssue, Result,
+            REVISION_CONFLICT_CHANGED_KEYS_LIMIT,
+        },
         models::{Pack, RefSpec},
         types::{
             DiagramKey, LineRange, PackId, PackName, RefKey, RelativePath, SectionKey, Status,
@@ -58,9 +61,12 @@ impl InputUseCases {
     async fn resolve_for_update(&self, identifier: &str, expected_revision: u64) -> Result<Pack> {
         let pack = self.resolve(identifier).await?;
         if pack.revision != expected_revision {
-            return Err(DomainError::RevisionConflict {
-                expected: expected_revision,
-                actual: pack.revision,
+            return Err(DomainError::RevisionConflictDetailed {
+                expected_revision,
+                current_revision: pack.revision,
+                last_updated_at: pack.updated_at.to_rfc3339(),
+                changed_section_keys: conflict_changed_section_keys(&pack),
+                guidance: revision_conflict_guidance(pack.revision),
             });
         }
         Ok(pack)
@@ -371,4 +377,16 @@ impl InputUseCases {
             .await?;
         Ok(pack)
     }
+}
+
+fn conflict_changed_section_keys(pack: &Pack) -> Vec<String> {
+    let mut keys = pack
+        .sections
+        .iter()
+        .map(|section| section.key.as_str().to_string())
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+    keys.truncate(REVISION_CONFLICT_CHANGED_KEYS_LIMIT);
+    keys
 }

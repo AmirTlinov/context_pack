@@ -22,7 +22,26 @@ pub(super) fn domain_error_response(id: Value, err: &DomainError) -> RpcEnvelope
             "revision_conflict",
             json!({
                 "expected_revision": expected,
-                "actual_revision": actual
+                "current_revision": actual,
+                "actual_revision": actual,
+            }),
+        ),
+        DomainError::RevisionConflictDetailed {
+            expected_revision,
+            current_revision,
+            last_updated_at,
+            changed_section_keys,
+            guidance,
+        } => (
+            "conflict",
+            "revision_conflict",
+            json!({
+                "expected_revision": expected_revision,
+                "current_revision": current_revision,
+                "actual_revision": current_revision,
+                "last_updated_at": last_updated_at,
+                "changed_section_keys": changed_section_keys,
+                "guidance": guidance,
             }),
         ),
         DomainError::InvalidState(_) => ("invalid_state", "invalid_state", Value::Null),

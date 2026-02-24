@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub const REVISION_CONFLICT_CHANGED_KEYS_LIMIT: usize = 12;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FinalizeRefIssue {
     pub section_key: String,
@@ -9,6 +11,21 @@ pub struct FinalizeRefIssue {
     pub line_start: usize,
     pub line_end: usize,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RevisionConflictDiagnostics {
+    pub expected_revision: u64,
+    pub current_revision: u64,
+    pub last_updated_at: String,
+    pub changed_section_keys: Vec<String>,
+    pub guidance: String,
+}
+
+pub fn revision_conflict_guidance(current_revision: u64) -> String {
+    format!(
+        "re-read latest pack via get, merge intent, retry with expected_revision={current_revision}"
+    )
 }
 
 #[derive(Debug, Error)]
@@ -33,6 +50,17 @@ pub enum DomainError {
 
     #[error("revision conflict: expected {expected}, actual {actual}")]
     RevisionConflict { expected: u64, actual: u64 },
+
+    #[error(
+        "revision conflict: expected {expected_revision}, current {current_revision}; {guidance}"
+    )]
+    RevisionConflictDetailed {
+        expected_revision: u64,
+        current_revision: u64,
+        last_updated_at: String,
+        changed_section_keys: Vec<String>,
+        guidance: String,
+    },
 
     #[error("invalid state: {0}")]
     InvalidState(String),

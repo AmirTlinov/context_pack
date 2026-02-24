@@ -804,13 +804,103 @@ async fn test_checked_mutation_rejects_stale_revision() {
     let stale = input_uc
         .set_meta_checked(&id, Some("X".into()), None, None, revision)
         .await;
-    assert!(matches!(
-        stale,
-        Err(DomainError::RevisionConflict {
-            expected,
-            actual
-        }) if expected == revision && actual == revision + 1
-    ));
+    match stale {
+        Err(DomainError::RevisionConflictDetailed {
+            expected_revision,
+            current_revision,
+            last_updated_at,
+            changed_section_keys,
+            guidance,
+        }) => {
+            assert_eq!(expected_revision, revision);
+            assert_eq!(current_revision, revision + 1);
+            assert!(
+                !last_updated_at.is_empty(),
+                "last_updated_at must be included"
+            );
+            assert!(
+                changed_section_keys.iter().any(|key| key == "sec-one"),
+                "changed_section_keys should include changed section"
+            );
+            assert!(
+                guidance.contains("re-read latest pack") && guidance.contains("expected_revision"),
+                "guidance must explain safe retry workflow"
+            );
+        }
+        other => panic!("expected RevisionConflictDetailed, got: {other:?}"),
+    }
+
+    let after_conflict = input_uc.get(&id).await.unwrap();
+    assert_eq!(
+        after_conflict.title, None,
+        "conflict must remain fail-closed without partial overwrite"
+    );
+
+    let retried = input_uc
+        .set_meta_checked(
+            &id,
+            Some("X".into()),
+            Some("retry after reread".into()),
+            None,
+            after_conflict.revision,
+        )
+        .await
+        .expect("retry after reread should succeed");
+    assert_eq!(retried.title.as_deref(), Some("X"));
+}
+
+#[tokio::test]
+async fn test_revision_conflict_changed_section_keys_are_bounded() {
+    let tmp = tempdir().unwrap();
+    let (input_uc, _) = build_services(tmp.path().join("packs"), tmp.path().to_path_buf());
+
+    let pack = input_uc
+        .create_with_tags_ttl(Some("conflict-bounded-pack".into()), None, None, None, 30)
+        .await
+        .unwrap();
+    let id = pack.id.as_str().to_string();
+    let stale_revision = pack.revision;
+    let mut current_revision = pack.revision;
+
+    for i in 0..20 {
+        let key = format!("sec-{i:02}");
+        let updated = input_uc
+            .upsert_section_checked(
+                &id,
+                &key,
+                format!("Section {i:02}"),
+                Some("agent A update".into()),
+                None,
+                current_revision,
+            )
+            .await
+            .unwrap();
+        current_revision = updated.revision;
+    }
+
+    let stale = input_uc
+        .set_meta_checked(&id, Some("stale".into()), None, None, stale_revision)
+        .await;
+    match stale {
+        Err(DomainError::RevisionConflictDetailed {
+            expected_revision,
+            current_revision: conflict_current,
+            changed_section_keys,
+            ..
+        }) => {
+            assert_eq!(expected_revision, stale_revision);
+            assert_eq!(conflict_current, current_revision);
+            assert!(
+                changed_section_keys.len() <= 12,
+                "changed_section_keys must be bounded"
+            );
+            assert!(
+                changed_section_keys.first().is_some_and(|k| k == "sec-00"),
+                "deterministic ordering should keep sorted section keys"
+            );
+        }
+        other => panic!("expected bounded RevisionConflictDetailed, got: {other:?}"),
+    }
 }
 
 #[tokio::test]

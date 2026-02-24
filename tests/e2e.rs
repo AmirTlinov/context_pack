@@ -713,7 +713,7 @@ async fn e2e_request_id_and_revision_conflict_contract() -> Result<()> {
                     "name":"input",
                     "arguments":{
                         "action":"set_meta",
-                        "id": pack_id,
+                        "id": pack_id.clone(),
                         "expected_revision": stale_revision,
                         "title":"new title"
                     }
@@ -730,11 +730,81 @@ async fn e2e_request_id_and_revision_conflict_contract() -> Result<()> {
             err_payload["details"]["expected_revision"].as_u64(),
             Some(stale_revision)
         );
+        let current_revision = err_payload["details"]["current_revision"]
+            .as_u64()
+            .context("missing current_revision details")?;
         assert!(
-            err_payload["details"]["actual_revision"]
-                .as_u64()
-                .unwrap_or(0)
-                > stale_revision
+            current_revision > stale_revision,
+            "conflict should include fresher current_revision"
+        );
+        assert_eq!(
+            err_payload["details"]["actual_revision"].as_u64(),
+            Some(current_revision),
+            "actual_revision is kept as compatibility alias"
+        );
+        assert!(
+            err_payload["details"]["last_updated_at"]
+                .as_str()
+                .unwrap_or_default()
+                .contains('T'),
+            "details must include last_updated_at timestamp"
+        );
+        let changed_keys = err_payload["details"]["changed_section_keys"]
+            .as_array()
+            .context("missing changed_section_keys")?;
+        assert!(
+            changed_keys.iter().any(|key| key.as_str() == Some("sec")),
+            "changed_section_keys should include the modified section"
+        );
+        assert!(
+            changed_keys.len() <= 12,
+            "changed_section_keys should be bounded"
+        );
+        assert!(
+            err_payload["details"]["guidance"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("re-read latest pack"),
+            "guidance must explain retry workflow"
+        );
+
+        let reread = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":"reread-1",
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"get",
+                        "id": pack_id.clone()
+                    }
+                }
+            }))
+            .await?;
+        let latest_revision = payload_pack_revision(&parse_tool_payload(&reread)?)?;
+
+        let retry = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":"retry-1",
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"set_meta",
+                        "id": pack_id,
+                        "expected_revision": latest_revision,
+                        "title":"resolved-after-reread"
+                    }
+                }
+            }))
+            .await?;
+        assert_ne!(retry["result"]["isError"], true);
+        let retried_payload = parse_tool_payload(&retry)?;
+        assert!(
+            payload_pack_revision(&retried_payload)? > latest_revision,
+            "retry with fresh revision should succeed and bump revision"
         );
         Ok(())
     }
