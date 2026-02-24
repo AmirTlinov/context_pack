@@ -77,21 +77,21 @@ pub(super) fn tools_schema() -> Value {
                         "status": {
                             "type": "string",
                             "enum": ["draft", "finalized"],
-                            "description": "Optional status filter (for list and get)"
+                            "description": "Optional status filter (for list and read)"
                         },
                         "freshness": {
                             "type": "string",
                             "enum": ["fresh", "expiring_soon", "expired"],
                             "description": "Optional freshness filter for list."
                         },
-                        "mode": {
+                        "profile": {
                             "type": "string",
-                            "enum": ["full", "compact"],
-                            "description": "Render mode for output get (default: compact handoff page; use full for complete snippets)"
+                            "enum": ["orchestrator", "reviewer", "executor"],
+                            "description": "Read profile defaults: orchestrator (compact bounded), reviewer (full evidence), executor (actionable compact)."
                         },
                         "query": { "type": "string", "description": "Optional text search for list" },
-                        "cursor": { "type": "string", "description": "Opaque cursor returned by output get paging metadata" },
-                        "match": { "type": "string", "description": "Regex filter applied to output get chunks" },
+                        "page_token": { "type": "string", "description": "Opaque page token returned by output read paging metadata." },
+                        "contains": { "type": "string", "description": "Optional substring filter applied to rendered chunks." },
                         "limit": { "type": "integer" },
                         "offset": { "type": "integer" }
                     }

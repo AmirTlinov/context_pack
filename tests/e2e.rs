@@ -477,7 +477,7 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
                     "name":"output",
                     "arguments":{
                         "id": pack_id.clone(),
-                        "mode":"full"
+                        "profile":"reviewer"
                     }
                 }
             }))
@@ -1284,7 +1284,7 @@ async fn e2e_notification_without_id_produces_no_response() -> Result<()> {
 }
 
 #[tokio::test]
-async fn e2e_output_get_supports_mode_match_paging_and_cursor() -> Result<()> {
+async fn e2e_output_read_supports_profiles_contains_and_page_token() -> Result<()> {
     let dir = tempdir()?;
     let storage_root = dir.path().join("storage");
     let source_root = dir.path().join("source");
@@ -1379,8 +1379,8 @@ async fn e2e_output_get_supports_mode_match_paging_and_cursor() -> Result<()> {
                     "arguments":{
                         "action":"read",
                         "id": pack_id.clone(),
-                        "mode":"compact",
-                        "match":"TOKEN_0[12]",
+                        "profile":"orchestrator",
+                        "contains":"TOKEN_0",
                         "limit":1
                     }
                 }
@@ -1389,9 +1389,9 @@ async fn e2e_output_get_supports_mode_match_paging_and_cursor() -> Result<()> {
         let markdown1 = output_markdown(&page1)?;
         assert!(!markdown1.contains("```rust"));
         assert_eq!(legend_value(markdown1, "has_more").as_deref(), Some("true"));
-        let next = legend_value(markdown1, "next")
+        let next = legend_value(markdown1, "next_page_token")
             .filter(|value| value != "null")
-            .context("missing next cursor on first page")?;
+            .context("missing next page token on first page")?;
         assert_eq!(rendered_ref_keys(markdown1), vec!["ref-01"]);
 
         let page2 = client
@@ -1404,19 +1404,43 @@ async fn e2e_output_get_supports_mode_match_paging_and_cursor() -> Result<()> {
                     "arguments":{
                         "action":"read",
                         "id": pack_id,
-                        "cursor": next
+                        "page_token": next
                     }
                 }
             }))
             .await?;
         let markdown2 = output_markdown(&page2)?;
+        assert_eq!(legend_value(markdown2, "has_more").as_deref(), Some("true"));
+        let next_page_two = legend_value(markdown2, "next_page_token")
+            .filter(|value| value != "null")
+            .context("missing next page token on second page")?;
+        assert_eq!(rendered_ref_keys(markdown2), vec!["ref-02"]);
+
+        let page3 = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":9,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"read",
+                        "id": pack_id,
+                        "page_token": next_page_two
+                    }
+                }
+            }))
+            .await?;
+        let markdown3 = output_markdown(&page3)?;
         assert_eq!(
-            legend_value(markdown2, "has_more").as_deref(),
+            legend_value(markdown3, "has_more").as_deref(),
             Some("false")
         );
-        assert_eq!(legend_value(markdown2, "next").as_deref(), Some("null"));
-        assert_eq!(rendered_ref_keys(markdown2), vec!["ref-02"]);
-        assert!(!markdown2.contains("ref-03"));
+        assert_eq!(
+            legend_value(markdown3, "next_page_token").as_deref(),
+            Some("null")
+        );
+        assert_eq!(rendered_ref_keys(markdown3), vec!["ref-03"]);
 
         Ok(())
     }
@@ -1427,7 +1451,7 @@ async fn e2e_output_get_supports_mode_match_paging_and_cursor() -> Result<()> {
 }
 
 #[tokio::test]
-async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Result<()> {
+async fn e2e_output_read_orchestrator_default_is_bounded_and_reviewer_is_full() -> Result<()> {
     let dir = tempdir()?;
     let storage_root = dir.path().join("storage");
     let source_root = dir.path().join("source");
@@ -1530,6 +1554,7 @@ async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Resul
             }))
             .await?;
         let compact_markdown = output_markdown(&compact_default)?;
+        assert!(compact_markdown.contains("- profile: orchestrator"));
         assert!(compact_markdown.contains("- mode: compact"));
         assert!(compact_markdown.contains("- paging: active"));
         assert!(compact_markdown.contains("- limit: 6"));
@@ -1550,9 +1575,9 @@ async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Resul
             6,
             "default compact handoff must be bounded by default page size"
         );
-        let next_cursor = legend_value(compact_markdown, "next")
+        let next_cursor = legend_value(compact_markdown, "next_page_token")
             .filter(|value| value != "null")
-            .context("default compact page should expose next cursor for remainder")?;
+            .context("default compact page should expose next page token for remainder")?;
 
         let compact_page_two = client
             .call(json!({
@@ -1564,7 +1589,7 @@ async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Resul
                     "arguments":{
                         "action":"read",
                         "id": pack_id.clone(),
-                        "cursor": next_cursor
+                        "page_token": next_cursor
                     }
                 }
             }))
@@ -1585,9 +1610,9 @@ async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Resul
             legend_value(compact_page_two_markdown, "has_more").as_deref(),
             Some("true")
         );
-        let next_cursor_page_two = legend_value(compact_page_two_markdown, "next")
+        let next_cursor_page_two = legend_value(compact_page_two_markdown, "next_page_token")
             .filter(|value| value != "null")
-            .context("second compact page should still expose next cursor")?;
+            .context("second compact page should still expose next page token")?;
 
         let compact_page_three = client
             .call(json!({
@@ -1599,7 +1624,7 @@ async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Resul
                     "arguments":{
                         "action":"read",
                         "id": pack_id.clone(),
-                        "cursor": next_cursor_page_two
+                        "page_token": next_cursor_page_two
                     }
                 }
             }))
@@ -1614,7 +1639,7 @@ async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Resul
             ]
         );
         assert_eq!(
-            legend_value(compact_page_three_markdown, "next").as_deref(),
+            legend_value(compact_page_three_markdown, "next_page_token").as_deref(),
             Some("null")
         );
 
@@ -1628,7 +1653,7 @@ async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Resul
                     "arguments":{
                         "action":"read",
                         "id": pack_id,
-                        "mode":"full"
+                        "profile":"reviewer"
                     }
                 }
             }))
@@ -1649,7 +1674,7 @@ async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Resul
 }
 
 #[tokio::test]
-async fn e2e_output_get_invalid_regex_returns_validation_error() -> Result<()> {
+async fn e2e_output_read_rejects_legacy_match_cursor_mode_fields() -> Result<()> {
     let dir = tempdir()?;
     let storage_root = dir.path().join("storage");
     let source_root = dir.path().join("source");
@@ -1694,7 +1719,7 @@ async fn e2e_output_get_invalid_regex_returns_validation_error() -> Result<()> {
                     "arguments":{
                         "action":"read",
                         "id": pack_id,
-                        "match":"[broken"
+                        "match":"legacy-regex"
                     }
                 }
             }))
@@ -1707,7 +1732,51 @@ async fn e2e_output_get_invalid_regex_returns_validation_error() -> Result<()> {
         assert!(err_payload["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("invalid regex"));
+            .contains("'match' is not supported"));
+
+        let cursor_response = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":4,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"read",
+                        "id":"pk_aaaaaaaa",
+                        "cursor":"v1:abc"
+                    }
+                }
+            }))
+            .await?;
+        assert_eq!(cursor_response["result"]["isError"], true);
+        let cursor_payload = parse_tool_payload(&cursor_response)?;
+        assert!(cursor_payload["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("'cursor' is not supported"));
+
+        let mode_response = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":5,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"read",
+                        "id":"pk_aaaaaaaa",
+                        "mode":"full"
+                    }
+                }
+            }))
+            .await?;
+        assert_eq!(mode_response["result"]["isError"], true);
+        let mode_payload = parse_tool_payload(&mode_response)?;
+        assert!(mode_payload["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("'mode' is not supported"));
         Ok(())
     }
     .await;
@@ -2515,7 +2584,7 @@ async fn e2e_freshness_metadata_filters_and_warnings() -> Result<()> {
             legend_value(output_markdown_expiring, "warning")
                 .as_deref()
                 .is_some_and(|warning| warning.contains("expiring soon")),
-            "output get legend must include expiring warning"
+            "output read legend must include expiring warning"
         );
 
         let output_list_expired = client
@@ -2734,7 +2803,7 @@ async fn e2e_multi_agent_handoff_compact_full_and_stale_path() -> Result<()> {
                     "arguments":{
                         "action":"read",
                         "id":pack_id.clone(),
-                        "mode":"full"
+                        "profile":"reviewer"
                     }
                 }
             }))

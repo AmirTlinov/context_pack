@@ -7,7 +7,7 @@ use mcp_context_pack::{
     adapters::{code_excerpt_fs::CodeExcerptFsAdapter, storage_json::JsonStorageAdapter},
     app::{
         input_usecases::{InputUseCases, TouchTtlMode, UpsertRefRequest},
-        output_usecases::{OutputGetRequest, OutputMode, OutputUseCases},
+        output_usecases::{OutputProfile, OutputReadRequest, OutputUseCases},
         ports::FreshnessState,
     },
     domain::errors::DomainError,
@@ -159,8 +159,17 @@ async fn test_full_pack_lifecycle() {
         .await
         .unwrap();
 
-    // Render output
-    let rendered = output_uc.get_rendered(&pack_id, None).await.unwrap();
+    // Render output with reviewer profile to validate full evidence excerpts
+    let rendered = output_uc
+        .get_rendered_with_request(
+            &pack_id,
+            OutputReadRequest {
+                profile: Some(OutputProfile::Reviewer),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
     assert!(rendered.contains("[LEGEND]"), "must have LEGEND section");
     assert!(rendered.contains("[CONTENT]"), "must have CONTENT section");
@@ -1240,8 +1249,8 @@ fn legend_value(rendered: &str, key: &str) -> Option<String> {
         .find_map(|line| line.trim().strip_prefix(&prefix).map(str::to_string))
 }
 
-fn extract_next_cursor(rendered: &str) -> Option<String> {
-    let raw = legend_value(rendered, "next")?;
+fn extract_next_page_token(rendered: &str) -> Option<String> {
+    let raw = legend_value(rendered, "next_page_token")?;
     if raw == "null" {
         None
     } else {
@@ -1330,7 +1339,7 @@ async fn seed_pack_with_refs(
 }
 
 #[tokio::test]
-async fn test_output_get_bc_without_paging_keeps_legacy_shape() {
+async fn test_output_read_reviewer_profile_preserves_full_evidence() {
     let tmp = tempdir().unwrap();
     let storage_dir = tmp.path().join("packs");
     let source_root = tmp.path().join("src");
@@ -1340,8 +1349,8 @@ async fn test_output_get_bc_without_paging_keeps_legacy_shape() {
     let (input_uc, output_uc) = build_services(storage_dir, tmp.path().to_path_buf());
     let pack = input_uc
         .create_with_tags_ttl(
-            Some("bc-pack".into()),
-            Some("BC Pack".into()),
+            Some("reviewer-pack".into()),
+            Some("Reviewer Pack".into()),
             None,
             None,
             30,
@@ -1374,220 +1383,90 @@ async fn test_output_get_bc_without_paging_keeps_legacy_shape() {
     let rendered = output_uc
         .get_rendered_with_request(
             &id,
-            OutputGetRequest {
-                mode: Some(OutputMode::Full),
+            OutputReadRequest {
+                profile: Some(OutputProfile::Reviewer),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
 
-    assert!(rendered.contains("[LEGEND]"));
-    assert!(rendered.contains("[CONTENT]"));
+    assert_eq!(
+        legend_value(&rendered, "profile").as_deref(),
+        Some("reviewer")
+    );
     assert!(rendered.contains("```rust"));
     assert!(!rendered.contains("- paging: active"));
-    assert!(!rendered.contains("- has_more:"));
-    assert!(!rendered.contains("- next:"));
+    assert!(!rendered.contains("- next_page_token:"));
 }
 
 #[tokio::test]
-async fn test_output_get_compact_mode_omits_code_but_keeps_metadata_and_stale_markers() {
-    let tmp = tempdir().unwrap();
-    let storage_dir = tmp.path().join("packs");
-    let source_root = tmp.path().join("src");
-    std::fs::create_dir_all(&source_root).unwrap();
-    std::fs::write(source_root.join("sample.rs"), "line1\nline2\n").unwrap();
-
-    let (input_uc, output_uc) = build_services(storage_dir, tmp.path().to_path_buf());
-    let pack = input_uc
-        .create_with_tags_ttl(
-            Some("compact-pack".into()),
-            Some("Compact Pack".into()),
-            None,
-            None,
-            30,
-        )
-        .await
-        .unwrap();
-    let id = pack.id.as_str().to_string();
-    let pack = input_uc
-        .upsert_section_checked(&id, "sec", "Section".into(), None, None, pack.revision)
-        .await
-        .unwrap();
-    let pack = input_uc
-        .upsert_ref_checked(
-            &id,
-            UpsertRefRequest {
-                section_key: "sec".into(),
-                ref_key: "ref-01".into(),
-                path: "src/sample.rs".into(),
-                line_start: 1,
-                line_end: 1,
-                title: Some("valid ref".into()),
-                why: Some("for contrast".into()),
-                group: None,
-            },
-            pack.revision,
-        )
-        .await
-        .unwrap();
-    input_uc
-        .upsert_ref_checked(
-            &id,
-            UpsertRefRequest {
-                section_key: "sec".into(),
-                ref_key: "ref-02".into(),
-                path: "src/sample.rs".into(),
-                line_start: 9,
-                line_end: 9,
-                title: Some("stale ref".into()),
-                why: Some("must keep stale marker".into()),
-                group: None,
-            },
-            pack.revision,
-        )
-        .await
-        .unwrap();
-
-    let full = output_uc
-        .get_rendered_with_request(
-            &id,
-            OutputGetRequest {
-                mode: Some(OutputMode::Full),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let compact = output_uc
-        .get_rendered_with_request(
-            &id,
-            OutputGetRequest {
-                mode: Some(OutputMode::Compact),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-    assert!(full.contains("```rust"));
-    assert!(compact.contains("- path: src/sample.rs"));
-    assert!(compact.contains("- lines: 1-1"));
-    assert!(compact.contains("- lines: 9-9"));
-    assert!(compact.contains("> stale ref:"));
-    assert!(!compact.contains("```rust"));
-    assert!(compact.contains("## Handoff summary [handoff]"));
-    assert!(compact.contains("- objective:"));
-    assert!(compact.contains("- scope:"));
-    assert!(compact.contains("- verdict_status:"));
-    assert!(compact.contains("- top_risks:"));
-    assert!(compact.contains("- top_gaps:"));
-    assert!(compact.contains("- freshness:"));
-    assert!(compact.contains("- deep_nav_hints:"));
-}
-
-#[tokio::test]
-async fn test_output_get_compact_mode_is_materially_smaller_than_full() {
+async fn test_output_read_orchestrator_default_is_compact_and_bounded() {
     let tmp = tempdir().unwrap();
     let storage_dir = tmp.path().join("packs");
     let source_root = tmp.path().join("src");
     std::fs::create_dir_all(&source_root).unwrap();
 
     let (input_uc, output_uc) = build_services(storage_dir, tmp.path().to_path_buf());
-    let file = source_root.join("heavy.rs");
-    let repetitive_payload = "let payload = \"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\"; ".repeat(6);
-    let heavy_source = (1..=12)
-        .map(|i| {
-            format!(
-                "fn step_{i:02}() {{ {} let token = \"TOKEN_{i:02}\"; }}\n",
-                repetitive_payload
-            )
-        })
-        .collect::<String>();
-    std::fs::write(&file, heavy_source).unwrap();
+    let id = seed_pack_with_refs(&input_uc, &source_root, "orchestrator-pack", 8).await;
 
-    let pack = input_uc
-        .create_with_tags_ttl(
-            Some("size-pack".into()),
-            Some("Size pack".into()),
-            None,
-            None,
-            30,
-        )
-        .await
-        .unwrap();
-    let id = pack.id.as_str().to_string();
-    let mut revision = pack.revision;
-
-    let pack = input_uc
-        .upsert_section_checked(
-            &id,
-            "sec-heavy",
-            "Heavy Section".into(),
-            Some("size comparison".into()),
-            None,
-            revision,
-        )
-        .await
-        .unwrap();
-    revision = pack.revision;
-
-    for idx in 1..=12 {
-        let pack = input_uc
-            .upsert_ref_checked(
-                &id,
-                UpsertRefRequest {
-                    section_key: "sec-heavy".into(),
-                    ref_key: format!("ref-{idx:02}"),
-                    path: "src/heavy.rs".into(),
-                    line_start: idx,
-                    line_end: idx,
-                    title: Some(format!("Heavy ref {idx:02}")),
-                    why: Some("size check".into()),
-                    group: None,
-                },
-                revision,
-            )
-            .await
-            .unwrap();
-        revision = pack.revision;
-    }
-
-    let full = output_uc
-        .get_rendered_with_request(
-            &id,
-            OutputGetRequest {
-                mode: Some(OutputMode::Full),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let compact = output_uc
-        .get_rendered_with_request(
-            &id,
-            OutputGetRequest {
-                mode: Some(OutputMode::Compact),
-                ..Default::default()
-            },
-        )
+    let rendered = output_uc
+        .get_rendered_with_request(&id, OutputReadRequest::default())
         .await
         .unwrap();
 
-    assert!(
-        compact.len() < full.len(),
-        "compact mode must be smaller than full mode"
+    assert_eq!(
+        legend_value(&rendered, "profile").as_deref(),
+        Some("orchestrator")
     );
-    assert!(
-        compact.len() * 100 <= full.len() * 80,
-        "compact mode should be materially smaller (<=80% of full): compact={}, full={}",
-        compact.len(),
-        full.len()
+    assert_eq!(legend_value(&rendered, "mode").as_deref(), Some("compact"));
+    assert_eq!(legend_value(&rendered, "paging").as_deref(), Some("active"));
+    assert_eq!(legend_value(&rendered, "limit").as_deref(), Some("6"));
+    assert_eq!(legend_value(&rendered, "has_more").as_deref(), Some("true"));
+    assert!(legend_value(&rendered, "next_page_token").is_some());
+    assert!(rendered.contains("## Handoff summary [handoff]"));
+    assert!(!rendered.contains("```rust"));
+    assert_eq!(
+        rendered_ref_keys(&rendered).len(),
+        6,
+        "orchestrator profile should use bounded compact default"
     );
 }
 
 #[tokio::test]
-async fn test_output_get_paging_resume_via_next_cursor_no_gaps_or_duplicates() {
+async fn test_output_read_executor_profile_is_actionable_compact() {
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("packs");
+    let source_root = tmp.path().join("src");
+    std::fs::create_dir_all(&source_root).unwrap();
+
+    let (input_uc, output_uc) = build_services(storage_dir, tmp.path().to_path_buf());
+    let id = seed_pack_with_refs(&input_uc, &source_root, "executor-pack", 13).await;
+
+    let rendered = output_uc
+        .get_rendered_with_request(
+            &id,
+            OutputReadRequest {
+                profile: Some(OutputProfile::Executor),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        legend_value(&rendered, "profile").as_deref(),
+        Some("executor")
+    );
+    assert_eq!(legend_value(&rendered, "mode").as_deref(), Some("compact"));
+    assert_eq!(legend_value(&rendered, "limit").as_deref(), Some("12"));
+    assert_eq!(legend_value(&rendered, "has_more").as_deref(), Some("true"));
+    assert!(rendered.contains("- path: src/paging.rs"));
+    assert!(!rendered.contains("```rust"));
+}
+
+#[tokio::test]
+async fn test_output_read_page_token_paging_is_deterministic_and_validated() {
     let tmp = tempdir().unwrap();
     let storage_dir = tmp.path().join("packs");
     let source_root = tmp.path().join("src");
@@ -1599,23 +1478,22 @@ async fn test_output_get_paging_resume_via_next_cursor_no_gaps_or_duplicates() {
     let page1 = output_uc
         .get_rendered_with_request(
             &id,
-            OutputGetRequest {
-                mode: Some(OutputMode::Compact),
+            OutputReadRequest {
+                profile: Some(OutputProfile::Orchestrator),
                 limit: Some(2),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
-
     assert_eq!(legend_value(&page1, "has_more").as_deref(), Some("true"));
-    let next = extract_next_cursor(&page1).expect("next cursor expected");
+    let page_token = extract_next_page_token(&page1).expect("next page_token expected");
 
     let page2 = output_uc
         .get_rendered_with_request(
             &id,
-            OutputGetRequest {
-                cursor: Some(next),
+            OutputReadRequest {
+                page_token: Some(page_token.clone()),
                 ..Default::default()
             },
         )
@@ -1623,80 +1501,32 @@ async fn test_output_get_paging_resume_via_next_cursor_no_gaps_or_duplicates() {
         .unwrap();
 
     assert_eq!(legend_value(&page2, "has_more").as_deref(), Some("false"));
-    assert_eq!(legend_value(&page2, "next").as_deref(), Some("null"));
+    assert_eq!(
+        legend_value(&page2, "next_page_token").as_deref(),
+        Some("null")
+    );
 
     let mut merged = rendered_ref_keys(&page1);
     merged.extend(rendered_ref_keys(&page2));
     assert_eq!(
         merged,
         vec!["ref-01", "ref-02", "ref-03", "ref-04"],
-        "cursor traversal must be complete without duplicates/gaps"
+        "page_token traversal must be complete without duplicates/gaps"
     );
-}
-
-#[tokio::test]
-async fn test_output_get_start_anywhere_via_offset() {
-    let tmp = tempdir().unwrap();
-    let storage_dir = tmp.path().join("packs");
-    let source_root = tmp.path().join("src");
-    std::fs::create_dir_all(&source_root).unwrap();
-
-    let (input_uc, output_uc) = build_services(storage_dir, tmp.path().to_path_buf());
-    let id = seed_pack_with_refs(&input_uc, &source_root, "offset-pack", 4).await;
-
-    let page = output_uc
-        .get_rendered_with_request(
-            &id,
-            OutputGetRequest {
-                mode: Some(OutputMode::Compact),
-                offset: Some(1),
-                limit: Some(2),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(legend_value(&page, "has_more").as_deref(), Some("true"));
-    assert_eq!(rendered_ref_keys(&page), vec!["ref-02", "ref-03"]);
-}
-
-#[tokio::test]
-async fn test_output_get_cursor_is_fail_closed_on_revision_or_fingerprint_mismatch() {
-    let tmp = tempdir().unwrap();
-    let storage_dir = tmp.path().join("packs");
-    let source_root = tmp.path().join("src");
-    std::fs::create_dir_all(&source_root).unwrap();
-
-    let (input_uc, output_uc) = build_services(storage_dir, tmp.path().to_path_buf());
-    let id = seed_pack_with_refs(&input_uc, &source_root, "cursor-pack", 3).await;
-
-    let page = output_uc
-        .get_rendered_with_request(
-            &id,
-            OutputGetRequest {
-                mode: Some(OutputMode::Compact),
-                limit: Some(1),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let cursor = extract_next_cursor(&page).expect("next cursor expected");
 
     let mismatch = output_uc
         .get_rendered_with_request(
             &id,
-            OutputGetRequest {
-                cursor: Some(cursor.clone()),
-                mode: Some(OutputMode::Full),
+            OutputReadRequest {
+                page_token: Some(page_token.clone()),
+                profile: Some(OutputProfile::Reviewer),
                 ..Default::default()
             },
         )
         .await
         .unwrap_err();
     assert!(
-        matches!(mismatch, DomainError::InvalidData(msg) if msg.contains("invalid_cursor") && msg.contains("fingerprint"))
+        matches!(mismatch, DomainError::InvalidData(msg) if msg.contains("invalid_page_token") && msg.contains("fingerprint"))
     );
 
     let snapshot = input_uc.get(&id).await.unwrap();
@@ -1715,66 +1545,55 @@ async fn test_output_get_cursor_is_fail_closed_on_revision_or_fingerprint_mismat
     let stale = output_uc
         .get_rendered_with_request(
             &id,
-            OutputGetRequest {
-                cursor: Some(cursor),
+            OutputReadRequest {
+                page_token: Some(page_token),
                 ..Default::default()
             },
         )
         .await
         .unwrap_err();
     assert!(
-        matches!(stale, DomainError::InvalidData(msg) if msg.contains("invalid_cursor") && msg.contains("revision"))
+        matches!(stale, DomainError::InvalidData(msg) if msg.contains("invalid_page_token") && msg.contains("revision"))
     );
 }
 
 #[tokio::test]
-async fn test_output_get_regex_filter_and_invalid_regex_validation() {
+async fn test_output_read_contains_filter() {
     let tmp = tempdir().unwrap();
     let storage_dir = tmp.path().join("packs");
     let source_root = tmp.path().join("src");
     std::fs::create_dir_all(&source_root).unwrap();
 
     let (input_uc, output_uc) = build_services(storage_dir, tmp.path().to_path_buf());
-    let id = seed_pack_with_refs(&input_uc, &source_root, "match-pack", 2).await;
+    let id = seed_pack_with_refs(&input_uc, &source_root, "contains-pack", 3).await;
 
-    let only_first = output_uc
+    let filtered = output_uc
         .get_rendered_with_request(
             &id,
-            OutputGetRequest {
-                mode: Some(OutputMode::Compact),
-                match_regex: Some("TOKEN_01".into()),
+            OutputReadRequest {
+                profile: Some(OutputProfile::Orchestrator),
+                contains: Some("token_02".into()),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
-    assert_eq!(rendered_ref_keys(&only_first), vec!["ref-01"]);
+    assert_eq!(rendered_ref_keys(&filtered), vec!["ref-02"]);
+    assert_eq!(
+        legend_value(&filtered, "contains").as_deref(),
+        Some("token_02")
+    );
 
     let no_match = output_uc
         .get_rendered_with_request(
             &id,
-            OutputGetRequest {
-                mode: Some(OutputMode::Compact),
-                match_regex: Some("NO_SUCH_TOKEN".into()),
+            OutputReadRequest {
+                profile: Some(OutputProfile::Orchestrator),
+                contains: Some("NO_SUCH_TOKEN".into()),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
     assert!(no_match.contains("_No chunks matched current filters._"));
-
-    let invalid = output_uc
-        .get_rendered_with_request(
-            &id,
-            OutputGetRequest {
-                match_regex: Some("[broken".into()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(invalid, DomainError::InvalidData(msg) if msg.contains("invalid regex") && msg.contains("match")),
-        "invalid regex must fail as validation error"
-    );
 }

@@ -36,7 +36,7 @@ With `context-pack`, agents place anchors (`path + line range`) via `input`, and
 
 1. Agent builds/updates a pack with `input` actions.
 2. Agent adds sections, code anchors, comments, diagrams.
-3. Agent calls `output get`.
+3. Agent calls `output read`.
 4. Orchestrator receives `pack_id + short summary`, then opens one complete markdown pack.
 
 ---
@@ -180,35 +180,35 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 - All mutating actions except `create` and `delete_pack` require `expected_revision`.
 - `create` requires `ttl_minutes`.
 - `touch_ttl` accepts exactly one: `ttl_minutes` or `extend_minutes`.
-- `output` actions stay `list|get` (no extra tool/action sprawl).
+- `output` actions stay `list|read` (no extra tool/action sprawl).
 - `input list` and `output list` accept optional `freshness` filter:
   - `fresh`
   - `expiring_soon`
   - `expired`
 - Default list behavior is stale-safe: expired packs are hidden unless `freshness=expired` is requested explicitly.
-- `output get` additive args: `mode(full|compact)`, `limit`, `offset`, `cursor`, `match` (regex).
-- Default `output get` now serves a **compact handoff-first page** (`mode=compact`, bounded by default `limit=6`) to keep orchestrator routing loops low-noise.
-- Compact handoff includes: objective/scope, verdict/status, top risks/gaps, freshness, and deep-nav hints.
-- Use `mode=full` for complete refs/anchors/snippets (deep review).
-- Freshness metadata is normalized and stable in list/get surfaces:
+- `output read` additive args: `profile(orchestrator|reviewer|executor)`, `limit`, `offset`, `page_token`, `contains` (case-insensitive substring).
+- Default `output read` uses `profile=orchestrator`: **compact handoff-first page** bounded by default `limit=6`.
+- `profile=reviewer` returns full evidence/snippets (deep review).
+- `profile=executor` returns actionable compact output (higher default bound than orchestrator).
+- Freshness metadata is normalized and stable in list/read surfaces:
   - `freshness_state`
   - `expires_at`
   - `ttl_remaining`
-- Human-readable output (`output list|get`) adds concise warnings for `expiring_soon` and `expired`.
-- Deterministic `output get(name=...)` resolution order:
+- Human-readable output (`output list|read`) adds concise warnings for `expiring_soon` and `expired`.
+- Deterministic `output read(name=...)` resolution order:
   1. prefer `finalized` candidates over non-finalized;
   2. inside that status tier, pick latest `updated_at`;
   3. if still tied, pick highest `revision`;
   4. if still tied, fail closed with `ambiguous` + `details.candidate_ids`.
-- Successful `output get` includes selection rationale in LEGEND:
+- Successful `output read` includes selection rationale in LEGEND:
   - `selected_by`
   - `selected_revision`
   - `selected_status`
-- `mode=compact` keeps ref metadata and stale markers, but omits code fences for refs.
-- Default compact handoff is bounded (`limit=6` when omitted) and returns `next` cursor for drill-down.
-- Paging contract: `limit` + (`offset` first page or `cursor` continuation) with deterministic legend fields `has_more` + `next`.
-- Cursor is fail-closed (`invalid_cursor` in message, `invalid_data` code) on stale/mismatch state.
-- `match` invalid regex returns validation error (`invalid_data`) with explicit reason.
+- Compact profiles keep ref metadata and stale markers, but omit code fences for refs.
+- Default orchestrator compact handoff is bounded (`limit=6` when omitted) and returns `next_page_token` for drill-down.
+- Paging contract: `limit` + (`offset` first page or `page_token` continuation) with deterministic legend fields `has_more` + `next_page_token`.
+- `page_token` is fail-closed (`invalid_page_token` in message, `invalid_data` code) on stale/mismatch state.
+- `contains` performs deterministic case-insensitive substring matching over rendered chunk text.
 - `output` is always markdown (`format` is rejected).
 
 ### Finalize checklist (fail-closed)
@@ -273,6 +273,20 @@ Use this quick map when upgrading clients from pre-#58 behavior.
   2. merge intent against changed sections,
   3. retry with fresh `expected_revision`.
 
+6) **#73 S3 output read profiles + page_token**
+- Before: clients used `output get` with `mode`, `cursor`, and regex `match`.
+- After:
+  - output contract is `action=read` with profile routing:
+    - `orchestrator` (default compact bounded),
+    - `reviewer` (full evidence),
+    - `executor` (actionable compact),
+  - `page_token` replaces cursor continuation,
+  - `contains` replaces regex complexity for deterministic substring filtering.
+- Migration examples:
+  - `{ "action":"read", "id":"pk_abcd2345" }`,
+  - `{ "action":"read", "id":"pk_abcd2345", "profile":"reviewer" }`,
+  - `{ "action":"read", "id":"pk_abcd2345", "page_token":"<token>" }`.
+
 ---
 
 ## CI and coverage policy (maintainers)
@@ -336,7 +350,7 @@ Compact handoff-first read (default, bounded):
 {
   "name": "output",
   "arguments": {
-    "action": "get",
+    "action": "read",
     "id": "pk_abcd2345"
   }
 }
@@ -348,22 +362,35 @@ Full drill-down read (complete snippets for review):
 {
   "name": "output",
   "arguments": {
-    "action": "get",
+    "action": "read",
     "id": "pk_abcd2345",
-    "mode": "full"
+    "profile": "reviewer"
   }
 }
 ```
 
-Continue compact paging using LEGEND `next` cursor:
+Executor compact read (actionable, higher compact bound):
 
 ```json
 {
   "name": "output",
   "arguments": {
-    "action": "get",
+    "action": "read",
     "id": "pk_abcd2345",
-    "cursor": "<next-from-legend>"
+    "profile": "executor"
+  }
+}
+```
+
+Continue paging using LEGEND `next_page_token`:
+
+```json
+{
+  "name": "output",
+  "arguments": {
+    "action": "read",
+    "id": "pk_abcd2345",
+    "page_token": "<next_page_token-from-legend>"
   }
 }
 ```
@@ -384,8 +411,9 @@ In successful output LEGEND, inspect:
 - `selected_by` (`exact_id` or name-based policy marker)
 - `selected_revision`
 - `selected_status`
+- `profile` (effective read profile)
 - `freshness_state` / `expires_at` / `ttl_remaining` (+ `warning` when stale risk is present)
-- `next` (for compact handoff paging continuation)
+- `next_page_token` (for paging continuation)
 
 </details>
 

@@ -3,7 +3,6 @@ use std::fmt::{self, Write as FmtWrite};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -50,36 +49,72 @@ impl FromStr for OutputMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputProfile {
+    #[default]
+    Orchestrator,
+    Reviewer,
+    Executor,
+}
+
+impl fmt::Display for OutputProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OutputProfile::Orchestrator => write!(f, "orchestrator"),
+            OutputProfile::Reviewer => write!(f, "reviewer"),
+            OutputProfile::Executor => write!(f, "executor"),
+        }
+    }
+}
+
+impl FromStr for OutputProfile {
+    type Err = DomainError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim() {
+            "orchestrator" => Ok(Self::Orchestrator),
+            "reviewer" => Ok(Self::Reviewer),
+            "executor" => Ok(Self::Executor),
+            other => Err(DomainError::InvalidData(format!(
+                "'profile' must be one of: orchestrator, reviewer, executor (got '{}')",
+                other
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
-pub struct OutputGetRequest {
+pub struct OutputReadRequest {
     pub status_filter: Option<Status>,
-    pub mode: Option<OutputMode>,
+    pub profile: Option<OutputProfile>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
-    pub cursor: Option<String>,
-    pub match_regex: Option<String>,
+    pub page_token: Option<String>,
+    pub contains: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct OutputCursorV1 {
+struct OutputPageTokenV1 {
     v: u8,
     pack_id: String,
     revision: u64,
     next_offset: usize,
     fingerprint: String,
-    mode: OutputMode,
+    profile: OutputProfile,
     status_filter: Option<Status>,
     limit: Option<usize>,
-    match_regex: Option<String>,
+    contains: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-struct EffectiveGetArgs {
+struct EffectiveReadArgs {
     status_filter: Option<Status>,
+    profile: OutputProfile,
     mode: OutputMode,
     limit: Option<usize>,
     start_offset: usize,
-    match_regex: Option<String>,
+    contains: Option<String>,
     paging_active: bool,
     fingerprint: String,
 }
@@ -162,7 +197,7 @@ impl OutputUseCases {
     ) -> Result<String> {
         self.get_rendered_with_request(
             identifier,
-            OutputGetRequest {
+            OutputReadRequest {
                 status_filter,
                 ..Default::default()
             },
@@ -173,10 +208,10 @@ impl OutputUseCases {
     pub async fn get_rendered_with_request(
         &self,
         identifier: &str,
-        request: OutputGetRequest,
+        request: OutputReadRequest,
     ) -> Result<String> {
         let pack = self.resolve(identifier).await?;
-        let args = self.resolve_effective_get_args(&pack, request)?;
+        let args = self.resolve_effective_read_args(&pack, request)?;
 
         if let Some(required) = args.status_filter {
             if pack.status != required {
@@ -187,45 +222,44 @@ impl OutputUseCases {
             }
         }
 
-        let regex = compile_match_regex(args.match_regex.as_deref())?;
-
-        if !args.paging_active && args.mode == OutputMode::Full && regex.is_none() {
-            return self.render_pack(&pack).await;
-        }
-
-        self.render_pack_advanced(&pack, &args, regex.as_ref())
-            .await
+        self.render_pack_advanced(&pack, &args).await
     }
 
-    fn resolve_effective_get_args(
+    fn resolve_effective_read_args(
         &self,
         pack: &Pack,
-        request: OutputGetRequest,
-    ) -> Result<EffectiveGetArgs> {
-        if request.cursor.is_some() && request.offset.is_some() {
-            return Err(invalid_cursor(
-                "provide either 'offset' or 'cursor', not both",
+        request: OutputReadRequest,
+    ) -> Result<EffectiveReadArgs> {
+        if request.page_token.is_some() && request.offset.is_some() {
+            return Err(invalid_page_token(
+                "provide either 'offset' or 'page_token', not both",
             ));
         }
 
-        let default_mode = request.mode.unwrap_or_default();
+        let default_profile = request.profile.unwrap_or_default();
+        let default_mode = profile_mode(default_profile);
+        let contains = normalize_contains(request.contains);
         let paging_requested =
-            request.limit.is_some() || request.offset.is_some() || request.cursor.is_some();
+            request.limit.is_some() || request.offset.is_some() || request.page_token.is_some();
 
-        match request.cursor {
-            Some(raw_cursor) => {
-                let cursor = decode_cursor_v1(&raw_cursor)?;
-                if cursor.pack_id != pack.id.as_str() {
-                    return Err(invalid_cursor("pack id mismatch"));
+        match request.page_token {
+            Some(raw_page_token) => {
+                let token = decode_page_token_v1(&raw_page_token)?;
+                if token.pack_id != pack.id.as_str() {
+                    return Err(invalid_page_token("pack id mismatch"));
                 }
-                if cursor.revision != pack.revision {
-                    return Err(invalid_cursor("pack revision changed"));
+                if token.revision != pack.revision {
+                    return Err(invalid_page_token("pack revision changed"));
                 }
 
-                let effective_mode = request.mode.unwrap_or(cursor.mode);
-                let effective_status = request.status_filter.or(cursor.status_filter);
-                let effective_limit = request.limit.or(cursor.limit);
-                let effective_match = request.match_regex.or(cursor.match_regex);
+                let effective_profile = request.profile.unwrap_or(token.profile);
+                let effective_mode = profile_mode(effective_profile);
+                let effective_status = request.status_filter.or(token.status_filter);
+                let effective_limit = request
+                    .limit
+                    .or(token.limit)
+                    .or_else(|| profile_default_limit(effective_profile));
+                let effective_contains = contains.or(token.contains);
 
                 if let Some(limit) = effective_limit {
                     if limit == 0 {
@@ -236,21 +270,23 @@ impl OutputUseCases {
                 }
 
                 let fingerprint = request_fingerprint(
+                    effective_profile,
                     effective_mode,
                     effective_status,
                     effective_limit,
-                    effective_match.as_deref(),
+                    effective_contains.as_deref(),
                 );
-                if cursor.fingerprint != fingerprint {
-                    return Err(invalid_cursor("request fingerprint mismatch"));
+                if token.fingerprint != fingerprint {
+                    return Err(invalid_page_token("request fingerprint mismatch"));
                 }
 
-                Ok(EffectiveGetArgs {
+                Ok(EffectiveReadArgs {
                     status_filter: effective_status,
+                    profile: effective_profile,
                     mode: effective_mode,
                     limit: effective_limit,
-                    start_offset: cursor.next_offset,
-                    match_regex: effective_match,
+                    start_offset: token.next_offset,
+                    contains: effective_contains,
                     paging_active: true,
                     fingerprint,
                 })
@@ -265,96 +301,37 @@ impl OutputUseCases {
                         }
                     }
                 }
+                let effective_limit = request
+                    .limit
+                    .or_else(|| profile_default_limit(default_profile));
+                let paging_active = paging_requested || effective_limit.is_some();
                 let fingerprint = request_fingerprint(
+                    default_profile,
                     default_mode,
                     request.status_filter,
-                    request.limit,
-                    request.match_regex.as_deref(),
+                    effective_limit,
+                    contains.as_deref(),
                 );
-                Ok(EffectiveGetArgs {
+                Ok(EffectiveReadArgs {
                     status_filter: request.status_filter,
+                    profile: default_profile,
                     mode: default_mode,
-                    limit: request.limit,
+                    limit: effective_limit,
                     start_offset: request.offset.unwrap_or(0),
-                    match_regex: request.match_regex,
-                    paging_active: paging_requested,
+                    contains,
+                    paging_active,
                     fingerprint,
                 })
             }
         }
     }
 
-    async fn render_pack(&self, pack: &Pack) -> Result<String> {
-        let mut out = String::with_capacity(2048);
-
-        // ── [LEGEND] ──────────────────────────────────────────────────────────
-        out.push_str("[LEGEND]\n");
-        write_legend_header(&mut out, pack);
-
-        // ── [CONTENT] ─────────────────────────────────────────────────────────
-        out.push_str("\n[CONTENT]\n");
-
-        for section in &pack.sections {
-            let _ = write!(out, "\n## {} [{}]\n", section.title, section.key);
-            if let Some(desc) = &section.description {
-                let _ = write!(out, "\n{}\n", desc);
-            }
-
-            // refs grouped by `group`
-            let groups = Pack::refs_grouped_in_section(section);
-            for (group_name, refs) in &groups {
-                let _ = write!(out, "\n### group: {}\n", group_name);
-                for r in refs {
-                    let _ = write!(out, "\n#### {} [{}]\n", r.key, section.key);
-                    if let Some(t) = &r.title {
-                        let _ = write!(out, "**{}**\n\n", t);
-                    }
-                    let _ = writeln!(out, "- path: {}", r.path);
-                    let _ = writeln!(out, "- lines: {}-{}", r.lines.start, r.lines.end);
-                    if let Some(why) = &r.why {
-                        let _ = writeln!(out, "- why: {}", why);
-                    }
-
-                    // fetch actual code excerpt
-                    match self.excerpt.read_lines(&r.path, r.lines).await {
-                        Ok(snippet) => {
-                            let lang = lang_from_path(r.path.as_str());
-                            let _ = write!(out, "\n```{}\n{}\n```\n", lang, snippet.body);
-                        }
-                        Err(DomainError::StaleRef(msg)) => {
-                            let _ = write!(out, "\n> stale ref: {}\n", msg);
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-
-            // diagrams for this section
-            if !section.diagrams.is_empty() {
-                out.push_str("\n### Diagrams\n");
-                for d in &section.diagrams {
-                    let _ = write!(out, "\n#### {}\n", d.title);
-                    if let Some(why) = &d.why {
-                        let _ = write!(out, "_{}_\n\n", why);
-                    }
-                    let _ = write!(out, "```mermaid\n{}\n```\n", d.mermaid);
-                }
-            }
-        }
-
-        Ok(out)
-    }
-
-    async fn render_pack_advanced(
-        &self,
-        pack: &Pack,
-        args: &EffectiveGetArgs,
-        regex: Option<&Regex>,
-    ) -> Result<String> {
+    async fn render_pack_advanced(&self, pack: &Pack, args: &EffectiveReadArgs) -> Result<String> {
         let mut chunks = self.collect_chunks(pack, args.mode).await?;
 
-        if let Some(matcher) = regex {
-            chunks.retain(|chunk| matcher.is_match(&chunk.searchable_text));
+        if let Some(contains) = args.contains.as_deref() {
+            let needle = contains.to_lowercase();
+            chunks.retain(|chunk| chunk.searchable_text.to_lowercase().contains(&needle));
         }
 
         let total_chunks = chunks.len();
@@ -366,17 +343,17 @@ impl OutputUseCases {
         let page_chunks = &chunks[start..end];
 
         let has_more = end < total_chunks;
-        let next_cursor = if args.paging_active && has_more {
-            Some(encode_cursor_v1(&OutputCursorV1 {
+        let next_page_token = if args.paging_active && has_more {
+            Some(encode_page_token_v1(&OutputPageTokenV1 {
                 v: 1,
                 pack_id: pack.id.as_str().to_string(),
                 revision: pack.revision,
                 next_offset: end,
                 fingerprint: args.fingerprint.clone(),
-                mode: args.mode,
+                profile: args.profile,
                 status_filter: args.status_filter,
                 limit: args.limit,
-                match_regex: args.match_regex.clone(),
+                contains: args.contains.clone(),
             })?)
         } else {
             None
@@ -385,11 +362,12 @@ impl OutputUseCases {
         let mut out = String::with_capacity(2048);
         out.push_str("[LEGEND]\n");
         write_legend_header(&mut out, pack);
+        let _ = writeln!(out, "- profile: {}", args.profile);
         if args.mode == OutputMode::Compact {
             let _ = writeln!(out, "- mode: compact");
         }
-        if let Some(pattern) = &args.match_regex {
-            let _ = writeln!(out, "- match: {}", pattern);
+        if let Some(contains) = &args.contains {
+            let _ = writeln!(out, "- contains: {}", contains);
         }
         if args.paging_active {
             let _ = writeln!(out, "- paging: active");
@@ -407,7 +385,11 @@ impl OutputUseCases {
                 "- has_more: {}",
                 if has_more { "true" } else { "false" }
             );
-            let _ = writeln!(out, "- next: {}", next_cursor.as_deref().unwrap_or("null"));
+            let _ = writeln!(
+                out,
+                "- next_page_token: {}",
+                next_page_token.as_deref().unwrap_or("null")
+            );
             let _ = writeln!(out, "- chunks_total: {}", total_chunks);
             let _ = writeln!(out, "- chunks_returned: {}", page_chunks.len());
         }
@@ -552,15 +534,6 @@ impl OutputUseCases {
     }
 }
 
-fn compile_match_regex(pattern: Option<&str>) -> Result<Option<Regex>> {
-    let Some(pattern) = pattern else {
-        return Ok(None);
-    };
-    Regex::new(pattern)
-        .map(Some)
-        .map_err(|e| DomainError::InvalidData(format!("invalid regex in 'match': {}", e)))
-}
-
 fn write_legend_header(out: &mut String, pack: &Pack) {
     let title = pack
         .title
@@ -636,11 +609,11 @@ fn write_compact_handoff_summary(
     out.push_str("- deep_nav_hints:\n");
     let _ = writeln!(
         out,
-        "  - full_evidence: output get {{\"action\":\"get\",\"id\":\"{}\",\"mode\":\"full\"}}",
+        "  - full_evidence: output read {{\"action\":\"read\",\"id\":\"{}\",\"profile\":\"reviewer\"}}",
         pack.id
     );
     if has_more {
-        out.push_str("  - continue_compact: call output get with LEGEND `next` cursor\n");
+        out.push_str("  - continue_compact: call output read with LEGEND `next_page_token`\n");
     }
     let _ = writeln!(
         out,
@@ -737,7 +710,7 @@ fn compact_gap_signals(pack: &Pack, has_more: bool) -> Vec<String> {
     );
 
     if has_more && gaps.len() < COMPACT_SIGNAL_LIMIT {
-        gaps.push("compact page is partial; continue via LEGEND next cursor".to_string());
+        gaps.push("compact page is partial; continue via LEGEND next_page_token".to_string());
     }
 
     if gaps.is_empty() {
@@ -845,18 +818,20 @@ fn truncate_signal(raw: &str, max_chars: usize) -> String {
     out
 }
 
-fn invalid_cursor(reason: impl Into<String>) -> DomainError {
-    DomainError::InvalidData(format!("invalid_cursor: {}", reason.into()))
+fn invalid_page_token(reason: impl Into<String>) -> DomainError {
+    DomainError::InvalidData(format!("invalid_page_token: {}", reason.into()))
 }
 
 fn request_fingerprint(
+    profile: OutputProfile,
     mode: OutputMode,
     status_filter: Option<Status>,
     limit: Option<usize>,
-    match_regex: Option<&str>,
+    contains: Option<&str>,
 ) -> String {
     format!(
-        "mode={}|status={}|limit={}|match={}",
+        "profile={}|mode={}|status={}|limit={}|contains={}",
+        profile,
         mode,
         status_filter
             .map(|value| value.to_string())
@@ -864,27 +839,53 @@ fn request_fingerprint(
         limit
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_string()),
-        match_regex.unwrap_or("-")
+        contains.unwrap_or("-")
     )
 }
 
-fn encode_cursor_v1(cursor: &OutputCursorV1) -> Result<String> {
-    let raw = serde_json::to_vec(cursor)
-        .map_err(|e| invalid_cursor(format!("serialization error: {}", e)))?;
+fn encode_page_token_v1(page_token: &OutputPageTokenV1) -> Result<String> {
+    let raw = serde_json::to_vec(page_token)
+        .map_err(|e| invalid_page_token(format!("serialization error: {}", e)))?;
     Ok(format!("v1:{}", hex_encode(&raw)))
 }
 
-fn decode_cursor_v1(raw: &str) -> Result<OutputCursorV1> {
+fn decode_page_token_v1(raw: &str) -> Result<OutputPageTokenV1> {
     let hex = raw
         .strip_prefix("v1:")
-        .ok_or_else(|| invalid_cursor("unsupported version"))?;
-    let bytes = hex_decode(hex).map_err(invalid_cursor)?;
-    let cursor: OutputCursorV1 =
-        serde_json::from_slice(&bytes).map_err(|_| invalid_cursor("malformed payload"))?;
-    if cursor.v != 1 {
-        return Err(invalid_cursor("unsupported version"));
+        .ok_or_else(|| invalid_page_token("unsupported version"))?;
+    let bytes = hex_decode(hex).map_err(invalid_page_token)?;
+    let page_token: OutputPageTokenV1 =
+        serde_json::from_slice(&bytes).map_err(|_| invalid_page_token("malformed payload"))?;
+    if page_token.v != 1 {
+        return Err(invalid_page_token("unsupported version"));
     }
-    Ok(cursor)
+    Ok(page_token)
+}
+
+fn profile_mode(profile: OutputProfile) -> OutputMode {
+    match profile {
+        OutputProfile::Reviewer => OutputMode::Full,
+        OutputProfile::Orchestrator | OutputProfile::Executor => OutputMode::Compact,
+    }
+}
+
+fn profile_default_limit(profile: OutputProfile) -> Option<usize> {
+    match profile {
+        OutputProfile::Orchestrator => Some(6),
+        OutputProfile::Executor => Some(12),
+        OutputProfile::Reviewer => None,
+    }
+}
+
+fn normalize_contains(raw: Option<String>) -> Option<String> {
+    raw.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
