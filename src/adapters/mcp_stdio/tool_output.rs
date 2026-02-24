@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 
 use crate::app::output_usecases::{OutputProfile, OutputReadRequest, OutputUseCases};
@@ -38,7 +38,7 @@ pub(super) async fn handle_output_tool(
             tool_text_success(format_pack_list_markdown(&packs))
         }
         "read" => {
-            let ident = req_identifier(args)?;
+            let ident = req_output_identifier(args)?;
             let request = build_output_get_request(args)?;
             let out_str = uc.get_rendered_with_request(&ident, request).await?;
             let out_str = append_selection_metadata(&ident, out_str);
@@ -50,9 +50,15 @@ pub(super) async fn handle_output_tool(
 
 pub(super) fn reject_output_format_param(args: &Value) -> Result<(), DomainError> {
     if args.get("format").is_some() {
-        return Err(DomainError::InvalidData(
-            "'format' is not supported; output is always markdown".into(),
-        ));
+        return Err(DomainError::DetailedInvalidData {
+            message: "'format' is not supported; output is always markdown".into(),
+            details: json!({
+                "tool": "output",
+                "field": "format",
+                "required_mode": "markdown",
+                "replacement_hint": "omit the format field",
+            }),
+        });
     }
     Ok(())
 }
@@ -93,14 +99,29 @@ fn output_profile_opt(args: &Value) -> Result<Option<OutputProfile>, DomainError
 
 fn unsupported_output_action(action: &str) -> DomainError {
     if action == "get" {
-        DomainError::InvalidData(
-            "output action 'get' is not supported in v3; use action='read'".into(),
-        )
+        DomainError::DetailedInvalidData {
+            message: "output action 'get' is not supported in v3; use action='read'".into(),
+            details: json!({
+                "tool": "output",
+                "action": "unsupported",
+                "requested_action": "get",
+                "allowed_actions": ["list", "read"],
+                "legacy_mapping": {"action": "read"},
+            }),
+        }
     } else {
-        DomainError::InvalidData(format!(
-            "unknown output action '{}'; allowed actions: list, read",
-            action
-        ))
+        DomainError::DetailedInvalidData {
+            message: format!(
+                "unknown output action '{}'; allowed actions: list, read",
+                action
+            ),
+            details: json!({
+                "tool": "output",
+                "action": "unknown",
+                "requested_action": action,
+                "allowed_actions": ["list", "read"],
+            }),
+        }
     }
 }
 
@@ -125,20 +146,48 @@ fn build_output_get_request(args: &Value) -> Result<OutputReadRequest, DomainErr
 
 fn reject_legacy_read_fields(args: &Value) -> Result<(), DomainError> {
     if args.get("mode").is_some() {
-        return Err(DomainError::InvalidData(
-            "'mode' is not supported in v3 read; use 'profile' (orchestrator|reviewer|executor)"
-                .into(),
-        ));
+        return Err(DomainError::DetailedInvalidData {
+            message:
+                "'mode' is not supported in v3 read; use 'profile' (orchestrator|reviewer|executor)"
+                    .into(),
+            details: json!({
+                "tool": "output",
+                "action": "read",
+                "unsupported_field": "mode",
+                "supported_fields": [
+                    "profile",
+                    "limit",
+                    "offset",
+                    "page_token",
+                    "contains",
+                    "id",
+                    "name",
+                    "status"
+                ],
+            }),
+        });
     }
     if args.get("cursor").is_some() {
-        return Err(DomainError::InvalidData(
-            "'cursor' is not supported; use 'page_token'".into(),
-        ));
+        return Err(DomainError::DetailedInvalidData {
+            message: "'cursor' is not supported; use 'page_token'".into(),
+            details: json!({
+                "tool": "output",
+                "action": "read",
+                "unsupported_field": "cursor",
+                "supported_field": "page_token",
+            }),
+        });
     }
     if args.get("match").is_some() {
-        return Err(DomainError::InvalidData(
-            "'match' is not supported; use 'contains' substring filter".into(),
-        ));
+        return Err(DomainError::DetailedInvalidData {
+            message: "'match' is not supported; use 'contains' substring filter".into(),
+            details: json!({
+                "tool": "output",
+                "action": "read",
+                "unsupported_field": "match",
+                "supported_field": "contains",
+            }),
+        });
     }
     Ok(())
 }
@@ -210,6 +259,21 @@ fn append_metadata_without_legend(mut markdown: String, metadata: &[(&str, Strin
         markdown.push('\n');
     }
     markdown
+}
+
+fn req_output_identifier(args: &Value) -> Result<String, DomainError> {
+    req_identifier(args).map_err(|err| match err {
+        DomainError::InvalidData(_) => DomainError::DetailedInvalidData {
+            message: "output read requires 'id' or 'name'".into(),
+            details: json!({
+                "tool": "output",
+                "action": "read",
+                "required_fields": ["id", "name"],
+                "mutually_interchangeable": ["id", "name"],
+            }),
+        },
+        other => other,
+    })
 }
 
 fn metadata_value<'a>(metadata: &'a [(&str, String)], key: &str) -> Option<&'a str> {
