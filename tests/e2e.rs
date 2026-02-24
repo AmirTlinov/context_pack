@@ -1102,6 +1102,143 @@ async fn e2e_finalize_validation_reports_missing_sections_and_invalid_refs() -> 
 }
 
 #[tokio::test]
+async fn e2e_write_snapshot_validate_only_precheck_and_finalize_commit() -> Result<()> {
+    let dir = tempdir()?;
+    let storage_root = dir.path().join("storage");
+    let source_root = dir.path().join("source");
+    tokio::fs::create_dir_all(&storage_root).await?;
+    tokio::fs::create_dir_all(&source_root).await?;
+    tokio::fs::write(source_root.join("auth.rs"), "line1\nline2\nline3\n").await?;
+
+    let mut client = McpE2EClient::spawn(&storage_root, &source_root).await?;
+
+    let result: Result<()> = async {
+        let _ = client
+            .call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .await?;
+
+        let created = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"write",
+                        "snapshot":{
+                            "name":"snapshot-e2e",
+                            "title":"Snapshot E2E",
+                            "ttl_minutes":30,
+                            "status":"draft",
+                            "sections":[
+                                {"key":"notes","title":"Notes","description":"draft content"}
+                            ]
+                        }
+                    }
+                }
+            }))
+            .await?;
+        let created_payload = parse_tool_payload(&created)?;
+        let pack_id = created_payload["payload"]["id"]
+            .as_str()
+            .context("missing created pack id")?
+            .to_string();
+        let revision = payload_pack_revision(&created_payload)?;
+
+        let precheck = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":3,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"write",
+                        "identifier": pack_id.clone(),
+                        "expected_revision": revision,
+                        "validate_only": true,
+                        "snapshot":{
+                            "name":"snapshot-e2e",
+                            "title":"Finalize precheck",
+                            "status":"finalized",
+                            "sections":[
+                                {"key":"scope","title":"Scope","description":"scope text"},
+                                {"key":"findings","title":"Findings","description":"finding text","refs":[{"key":"ref-one","path":"auth.rs","line_start":1,"line_end":2}]}
+                            ]
+                        }
+                    }
+                }
+            }))
+            .await?;
+        assert_eq!(precheck["result"]["isError"], true);
+        let precheck_payload = parse_tool_payload(&precheck)?;
+        assert_eq!(precheck_payload["code"], "finalize_validation");
+        assert_eq!(precheck_payload["details"]["missing_sections"], json!(["qa"]));
+
+        let reread = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":4,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"get",
+                        "id": pack_id.clone()
+                    }
+                }
+            }))
+            .await?;
+        let reread_payload = parse_tool_payload(&reread)?;
+        assert_eq!(
+            payload_pack_revision(&reread_payload)?,
+            revision,
+            "validate_only precheck must not persist pack state"
+        );
+        assert_eq!(reread_payload["payload"]["status"], "draft");
+
+        let finalized = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":5,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"write",
+                        "identifier": pack_id.clone(),
+                        "expected_revision": revision,
+                        "snapshot":{
+                            "name":"snapshot-e2e",
+                            "title":"Finalize commit",
+                            "status":"finalized",
+                            "sections":[
+                                {"key":"scope","title":"Scope","description":"scope text"},
+                                {"key":"findings","title":"Findings","description":"finding text","refs":[{"key":"ref-one","path":"auth.rs","line_start":1,"line_end":2}]},
+                                {"key":"qa","title":"QA","description":"verdict: pass"}
+                            ]
+                        }
+                    }
+                }
+            }))
+            .await?;
+        let finalized_payload = parse_tool_payload(&finalized)?;
+        assert_eq!(finalized_payload["payload"]["status"], "finalized");
+        assert!(
+            payload_pack_revision(&finalized_payload)? > revision,
+            "persisted write should increment revision"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    client.stop().await?;
+    result
+}
+
+#[tokio::test]
 async fn e2e_touch_ttl_requires_mode_field() -> Result<()> {
     let dir = tempdir()?;
     let storage_root = dir.path().join("storage");

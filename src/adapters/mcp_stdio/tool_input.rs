@@ -1,11 +1,13 @@
 use serde_json::{json, Value};
 
 use crate::app::input_usecases::{
-    InputUseCases, TouchTtlMode, UpsertDiagramRequest, UpsertRefRequest,
+    InputUseCases, SnapshotDiagram, SnapshotDocument, SnapshotRef, SnapshotSection, TouchTtlMode,
+    UpsertDiagramRequest, UpsertRefRequest, WriteSnapshotRequest,
 };
 use crate::app::ports::FreshnessState;
 use crate::domain::errors::DomainError;
 use crate::domain::models::Pack;
+use crate::domain::types::Status;
 
 use super::{
     freshness_opt, pack_summary, req_identifier, req_status, req_str, req_u64, req_usize,
@@ -86,6 +88,13 @@ pub(super) async fn handle_input_tool(
 }
 
 async fn handle_write_action(args: &Value, uc: &InputUseCases) -> Result<Value, DomainError> {
+    if args.get("snapshot").is_some() {
+        let pack = uc
+            .write_snapshot(parse_write_snapshot_request(args)?)
+            .await?;
+        return tool_success("write", serde_json::to_value(pack)?);
+    }
+
     let op = req_str(args, "op")?;
     match op.as_str() {
         "create" => {
@@ -267,4 +276,159 @@ fn reject_legacy_alias(
         )));
     }
     Ok(())
+}
+
+fn parse_write_snapshot_request(args: &Value) -> Result<WriteSnapshotRequest, DomainError> {
+    let snapshot = args.get("snapshot").ok_or_else(|| {
+        DomainError::InvalidData("snapshot is required for action='write'".into())
+    })?;
+    let snapshot_obj = snapshot
+        .as_object()
+        .ok_or_else(|| DomainError::InvalidData("snapshot must be an object".into()))?;
+
+    let status = match snapshot_obj.get("status").and_then(Value::as_str) {
+        Some(raw) => raw.parse::<Status>()?,
+        None => Status::Draft,
+    };
+    let sections = snapshot_obj
+        .get("sections")
+        .and_then(Value::as_array)
+        .ok_or_else(|| DomainError::InvalidData("snapshot.sections is required".into()))?;
+
+    let mut parsed_sections = Vec::with_capacity(sections.len());
+    for section in sections {
+        let section_obj = section
+            .as_object()
+            .ok_or_else(|| DomainError::InvalidData("section must be an object".into()))?;
+        let refs = parse_snapshot_refs(section_obj.get("refs"))?;
+        let diagrams = parse_snapshot_diagrams(section_obj.get("diagrams"))?;
+        parsed_sections.push(SnapshotSection {
+            key: req_snapshot_str(section_obj, "key")?,
+            title: req_snapshot_str(section_obj, "title")?,
+            description: snapshot_opt_str(section_obj, "description"),
+            refs,
+            diagrams,
+        });
+    }
+
+    let tags = match snapshot_obj.get("tags") {
+        Some(raw_tags) => {
+            let tags = raw_tags
+                .as_array()
+                .ok_or_else(|| DomainError::InvalidData("snapshot.tags must be an array".into()))?;
+            let mut parsed = Vec::with_capacity(tags.len());
+            for tag in tags {
+                let value = tag.as_str().ok_or_else(|| {
+                    DomainError::InvalidData("snapshot.tags entries must be strings".into())
+                })?;
+                parsed.push(value.to_string());
+            }
+            parsed
+        }
+        None => Vec::new(),
+    };
+
+    let ttl_minutes = snapshot_obj
+        .get("ttl_minutes")
+        .map(snapshot_u64)
+        .transpose()?;
+
+    Ok(WriteSnapshotRequest {
+        identifier: str_opt(args, "identifier").or_else(|| str_opt(args, "id")),
+        expected_revision: u64_opt(args, "expected_revision")?,
+        validate_only: args
+            .get("validate_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        snapshot: SnapshotDocument {
+            name: snapshot_opt_str(snapshot_obj, "name"),
+            title: snapshot_opt_str(snapshot_obj, "title"),
+            brief: snapshot_opt_str(snapshot_obj, "brief"),
+            tags,
+            ttl_minutes,
+            status,
+            sections: parsed_sections,
+        },
+    })
+}
+
+fn parse_snapshot_refs(raw: Option<&Value>) -> Result<Vec<SnapshotRef>, DomainError> {
+    let Some(raw_refs) = raw else {
+        return Ok(Vec::new());
+    };
+    let refs = raw_refs
+        .as_array()
+        .ok_or_else(|| DomainError::InvalidData("section.refs must be an array".into()))?;
+    let mut out = Vec::with_capacity(refs.len());
+    for value in refs {
+        let obj = value
+            .as_object()
+            .ok_or_else(|| DomainError::InvalidData("ref must be an object".into()))?;
+        out.push(SnapshotRef {
+            key: req_snapshot_str(obj, "key")?,
+            path: req_snapshot_str(obj, "path")?,
+            line_start: req_snapshot_usize(obj, "line_start")?,
+            line_end: req_snapshot_usize(obj, "line_end")?,
+            title: snapshot_opt_str(obj, "title"),
+            why: snapshot_opt_str(obj, "why"),
+            group: snapshot_opt_str(obj, "group"),
+        });
+    }
+    Ok(out)
+}
+
+fn parse_snapshot_diagrams(raw: Option<&Value>) -> Result<Vec<SnapshotDiagram>, DomainError> {
+    let Some(raw_diagrams) = raw else {
+        return Ok(Vec::new());
+    };
+    let diagrams = raw_diagrams
+        .as_array()
+        .ok_or_else(|| DomainError::InvalidData("section.diagrams must be an array".into()))?;
+    let mut out = Vec::with_capacity(diagrams.len());
+    for value in diagrams {
+        let obj = value
+            .as_object()
+            .ok_or_else(|| DomainError::InvalidData("diagram must be an object".into()))?;
+        out.push(SnapshotDiagram {
+            key: req_snapshot_str(obj, "key")?,
+            title: req_snapshot_str(obj, "title")?,
+            mermaid: req_snapshot_str(obj, "mermaid")?,
+            why: snapshot_opt_str(obj, "why"),
+        });
+    }
+    Ok(out)
+}
+
+fn req_snapshot_str(
+    obj: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<String, DomainError> {
+    obj.get(key)
+        .and_then(Value::as_str)
+        .map(|value| value.to_string())
+        .ok_or_else(|| DomainError::InvalidData(format!("snapshot.{} is required", key)))
+}
+
+fn req_snapshot_usize(
+    obj: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<usize, DomainError> {
+    let value = obj
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| DomainError::InvalidData(format!("snapshot.{} is required", key)))?;
+    usize::try_from(value)
+        .map_err(|_| DomainError::InvalidData(format!("snapshot.{} is out of range", key)))
+}
+
+fn snapshot_u64(value: &Value) -> Result<u64, DomainError> {
+    value
+        .as_u64()
+        .ok_or_else(|| DomainError::InvalidData("snapshot.ttl_minutes must be an integer".into()))
+}
+
+fn snapshot_opt_str(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    obj.get(key)
+        .and_then(Value::as_str)
+        .map(|value| value.to_string())
 }

@@ -6,7 +6,10 @@ use chrono::{Duration, Utc};
 use mcp_context_pack::{
     adapters::{code_excerpt_fs::CodeExcerptFsAdapter, storage_json::JsonStorageAdapter},
     app::{
-        input_usecases::{InputUseCases, TouchTtlMode, UpsertRefRequest},
+        input_usecases::{
+            InputUseCases, SnapshotDocument, SnapshotRef, SnapshotSection, TouchTtlMode,
+            UpsertRefRequest, WriteSnapshotRequest,
+        },
         output_usecases::{OutputGetRequest, OutputMode, OutputUseCases},
         ports::FreshnessState,
     },
@@ -59,6 +62,33 @@ fn write_pack_file(storage_dir: &std::path::Path, pack: &Pack) {
         payload,
     )
     .unwrap();
+}
+
+fn snapshot_section(
+    key: &str,
+    title: &str,
+    description: Option<&str>,
+    refs: Vec<SnapshotRef>,
+) -> SnapshotSection {
+    SnapshotSection {
+        key: key.to_string(),
+        title: title.to_string(),
+        description: description.map(str::to_string),
+        refs,
+        diagrams: Vec::new(),
+    }
+}
+
+fn snapshot_ref(key: &str, path: &str, line_start: usize, line_end: usize) -> SnapshotRef {
+    SnapshotRef {
+        key: key.to_string(),
+        path: path.to_string(),
+        line_start,
+        line_end,
+        title: None,
+        why: None,
+        group: None,
+    }
 }
 
 #[tokio::test]
@@ -416,6 +446,213 @@ async fn test_draft_workflow_remains_flexible_before_finalize() {
             .any(|section| section.key.as_str() == "notes"),
         "draft mutations should remain allowed without finalize checklist sections"
     );
+}
+
+#[tokio::test]
+async fn test_write_snapshot_create_and_update_full_replace() {
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("packs");
+    let source_root = tmp.path().join("src");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::write(source_root.join("sample.rs"), "line1\nline2\nline3\n").unwrap();
+
+    let (input_uc, _) = build_services(storage_dir, tmp.path().to_path_buf());
+
+    let created = input_uc
+        .write_snapshot(WriteSnapshotRequest {
+            identifier: None,
+            expected_revision: None,
+            validate_only: false,
+            snapshot: SnapshotDocument {
+                name: Some("snapshot-flow-pack".into()),
+                title: Some("Snapshot flow".into()),
+                brief: Some("initial".into()),
+                tags: vec!["s2".into()],
+                ttl_minutes: Some(30),
+                status: Status::Draft,
+                sections: vec![snapshot_section(
+                    "notes",
+                    "Notes",
+                    Some("draft-only section"),
+                    vec![],
+                )],
+            },
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(created.status, Status::Draft);
+    assert_eq!(created.sections.len(), 1);
+    assert_eq!(created.sections[0].key.as_str(), "notes");
+
+    let pack_id = created.id.as_str().to_string();
+    let updated = input_uc
+        .write_snapshot(WriteSnapshotRequest {
+            identifier: Some(pack_id.clone()),
+            expected_revision: Some(created.revision),
+            validate_only: false,
+            snapshot: SnapshotDocument {
+                name: Some("snapshot-flow-pack".into()),
+                title: Some("Snapshot updated".into()),
+                brief: None,
+                tags: vec!["released".into()],
+                ttl_minutes: Some(45),
+                status: Status::Draft,
+                sections: vec![snapshot_section(
+                    "scope",
+                    "Scope",
+                    Some("full replace should drop previous sections"),
+                    vec![],
+                )],
+            },
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(updated.revision, created.revision + 1);
+    assert_eq!(updated.sections.len(), 1);
+    assert_eq!(updated.sections[0].key.as_str(), "scope");
+    assert_eq!(updated.tags, vec!["released"]);
+
+    let reread = input_uc.get(&pack_id).await.unwrap();
+    assert_eq!(reread.sections.len(), 1);
+    assert_eq!(reread.sections[0].key.as_str(), "scope");
+    assert!(reread
+        .sections
+        .iter()
+        .all(|section| section.key.as_str() != "notes"));
+}
+
+#[tokio::test]
+async fn test_write_snapshot_validate_only_finalize_precheck_is_non_persistent() {
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("packs");
+    let source_root = tmp.path().join("src");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::write(source_root.join("short.rs"), "line1\nline2\n").unwrap();
+
+    let (input_uc, _) = build_services(storage_dir, tmp.path().to_path_buf());
+
+    let created = input_uc
+        .write_snapshot(WriteSnapshotRequest {
+            identifier: None,
+            expected_revision: None,
+            validate_only: false,
+            snapshot: SnapshotDocument {
+                name: Some("validate-only-pack".into()),
+                title: None,
+                brief: None,
+                tags: vec![],
+                ttl_minutes: Some(30),
+                status: Status::Draft,
+                sections: vec![snapshot_section(
+                    "notes",
+                    "Notes",
+                    Some("seed draft"),
+                    vec![],
+                )],
+            },
+        })
+        .await
+        .unwrap();
+
+    let before_revision = created.revision;
+    let pack_id = created.id.as_str().to_string();
+
+    let err = input_uc
+        .write_snapshot(WriteSnapshotRequest {
+            identifier: Some(pack_id.clone()),
+            expected_revision: Some(before_revision),
+            validate_only: true,
+            snapshot: SnapshotDocument {
+                name: Some("validate-only-pack".into()),
+                title: Some("Finalize attempt".into()),
+                brief: None,
+                tags: vec!["precheck".into()],
+                ttl_minutes: None,
+                status: Status::Finalized,
+                sections: vec![
+                    snapshot_section("scope", "Scope", Some("scope text"), vec![]),
+                    snapshot_section(
+                        "findings",
+                        "Findings",
+                        Some("finding text"),
+                        vec![snapshot_ref("ref-one", "src/short.rs", 10, 10)],
+                    ),
+                    snapshot_section("qa", "QA", Some("verdict: fail"), vec![]),
+                ],
+            },
+        })
+        .await
+        .expect_err("validate_only finalize precheck must return structured diagnostics");
+
+    match err {
+        DomainError::FinalizeValidation {
+            missing_sections,
+            missing_fields,
+            invalid_refs,
+            ..
+        } => {
+            assert!(missing_sections.is_empty());
+            assert!(missing_fields.is_empty());
+            assert_eq!(invalid_refs.len(), 1);
+            assert_eq!(invalid_refs[0].section_key, "findings");
+            assert_eq!(invalid_refs[0].ref_key, "ref-one");
+        }
+        other => panic!("expected FinalizeValidation, got {other:?}"),
+    }
+
+    let after = input_uc.get(&pack_id).await.unwrap();
+    assert_eq!(
+        after.revision, before_revision,
+        "validate_only=true must not persist or mutate revision"
+    );
+    assert_eq!(after.status, Status::Draft);
+    assert_eq!(after.sections.len(), 1);
+    assert_eq!(after.sections[0].key.as_str(), "notes");
+}
+
+#[tokio::test]
+async fn test_write_snapshot_finalize_minimal_success() {
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("packs");
+    let source_root = tmp.path().join("src");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::write(source_root.join("sample.rs"), "line1\nline2\nline3\n").unwrap();
+
+    let (input_uc, _) = build_services(storage_dir, tmp.path().to_path_buf());
+
+    let finalized = input_uc
+        .write_snapshot(WriteSnapshotRequest {
+            identifier: None,
+            expected_revision: None,
+            validate_only: false,
+            snapshot: SnapshotDocument {
+                name: Some("minimal-finalize-pack".into()),
+                title: Some("Minimal finalize".into()),
+                brief: None,
+                tags: vec![],
+                ttl_minutes: Some(30),
+                status: Status::Finalized,
+                sections: vec![
+                    snapshot_section("scope", "Scope", Some("scope text"), vec![]),
+                    snapshot_section(
+                        "findings",
+                        "Findings",
+                        Some("finding text"),
+                        vec![snapshot_ref("ref-one", "src/sample.rs", 1, 2)],
+                    ),
+                    snapshot_section("qa", "QA", Some("verdict: pass"), vec![]),
+                ],
+            },
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(finalized.status, Status::Finalized);
+    let reread = input_uc.get("minimal-finalize-pack").await.unwrap();
+    assert_eq!(reread.status, Status::Finalized);
+    assert_eq!(reread.sections.len(), 3);
 }
 
 #[tokio::test]
