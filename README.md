@@ -187,6 +187,9 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
   - `expired`
 - Default list behavior is stale-safe: expired packs are hidden unless `freshness=expired` is requested explicitly.
 - `output get` additive args: `mode(full|compact)`, `limit`, `offset`, `cursor`, `match` (regex).
+- Default `output get` now serves a **compact handoff-first page** (`mode=compact`, bounded by default `limit=6`) to keep orchestrator routing loops low-noise.
+- Compact handoff includes: objective/scope, verdict/status, top risks/gaps, freshness, and deep-nav hints.
+- Use `mode=full` for complete refs/anchors/snippets (deep review).
 - Freshness metadata is normalized and stable in list/get surfaces:
   - `freshness_state`
   - `expires_at`
@@ -201,8 +204,8 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
   - `selected_by`
   - `selected_revision`
   - `selected_status`
-- Backward compatibility: `output get` without paging args keeps legacy full markdown shape.
 - `mode=compact` keeps ref metadata and stale markers, but omits code fences for refs.
+- Default compact handoff is bounded (`limit=6` when omitted) and returns `next` cursor for drill-down.
 - Paging contract: `limit` + (`offset` first page or `cursor` continuation) with deterministic legend fields `has_more` + `next`.
 - Cursor is fail-closed (`invalid_cursor` in message, `invalid_data` code) on stale/mismatch state.
 - `match` invalid regex returns validation error (`invalid_data`) with explicit reason.
@@ -255,7 +258,7 @@ scripts/check_coverage_baseline.sh
 
 ### Deterministic read examples
 
-Exact id read:
+Compact handoff-first read (default, bounded):
 
 ```json
 {
@@ -267,14 +270,28 @@ Exact id read:
 }
 ```
 
-Name-based read (deterministic/fail-closed):
+Full drill-down read (complete snippets for review):
 
 ```json
 {
   "name": "output",
   "arguments": {
     "action": "get",
-    "name": "auth-handoff-pack"
+    "id": "pk_abcd2345",
+    "mode": "full"
+  }
+}
+```
+
+Continue compact paging using LEGEND `next` cursor:
+
+```json
+{
+  "name": "output",
+  "arguments": {
+    "action": "get",
+    "id": "pk_abcd2345",
+    "cursor": "<next-from-legend>"
   }
 }
 ```
@@ -296,6 +313,7 @@ In successful output LEGEND, inspect:
 - `selected_revision`
 - `selected_status`
 - `freshness_state` / `expires_at` / `ttl_remaining` (+ `warning` when stale risk is present)
+- `next` (for compact handoff paging continuation)
 
 </details>
 
@@ -475,6 +493,9 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
   - `expired`
 - Поведение list по умолчанию stale-safe: expired-пакеты скрыты, пока явно не запрошен `freshness=expired`.
 - Дополнительные аргументы `output get`: `mode(full|compact)`, `limit`, `offset`, `cursor`, `match` (regex).
+- По умолчанию `output get` отдаёт **compact handoff-first страницу** (`mode=compact`, bounded `limit=6`), чтобы оркестратор принимал решение без перегруза.
+- Compact handoff включает: objective/scope, verdict/status, top risks/gaps, freshness и deep-nav hints.
+- Для полного ревью используйте `mode=full` (полные refs/anchors/snippets).
 - В list/get добавлена нормализованная freshness-мета в стабильной форме:
   - `freshness_state`
   - `expires_at`
@@ -489,8 +510,8 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
   - `selected_by`
   - `selected_revision`
   - `selected_status`
-- Обратная совместимость: `output get` без paging-аргументов возвращает прежний full-markdown формат.
 - `mode=compact` сохраняет метаданные ref и stale-маркеры, но убирает code fences у ref.
+- По умолчанию compact handoff bounded (`limit=6`, если не указан) и отдаёт `next` для drill-down.
 - Paging-контракт: `limit` + (`offset` для первой страницы или `cursor` для продолжения) с детерминированными `has_more` и `next` в LEGEND.
 - Cursor fail-closed: при stale/mismatch возвращается `invalid_data` с семантикой `invalid_cursor` в message.
 - Невалидный regex в `match` возвращает validation error (`invalid_data`) с явной причиной.
@@ -517,7 +538,7 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 
 ### Примеры детерминированного чтения
 
-Чтение по точному id:
+Compact handoff-first чтение (по умолчанию, bounded):
 
 ```json
 {
@@ -529,14 +550,28 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 }
 ```
 
-Чтение по name (детерминированно/fail-closed):
+Полный drill-down для ревью (полные snippets):
 
 ```json
 {
   "name": "output",
   "arguments": {
     "action": "get",
-    "name": "auth-handoff-pack"
+    "id": "pk_abcd2345",
+    "mode": "full"
+  }
+}
+```
+
+Продолжение compact paging через LEGEND `next`:
+
+```json
+{
+  "name": "output",
+  "arguments": {
+    "action": "get",
+    "id": "pk_abcd2345",
+    "cursor": "<next-from-legend>"
   }
 }
 ```
@@ -558,5 +593,6 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 - `selected_revision`
 - `selected_status`
 - `freshness_state` / `expires_at` / `ttl_remaining` (+ `warning`, когда есть риск stale)
+- `next` (для продолжения compact handoff paging)
 
 </details>
