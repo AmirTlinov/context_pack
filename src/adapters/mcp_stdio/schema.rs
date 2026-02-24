@@ -5,21 +5,27 @@ pub(super) fn tools_schema() -> Value {
         "tools": [
             {
                 "name": "input",
-                "description": "Manage context packs: create/update/get/list, mutate sections/refs/diagrams, and update status/meta.",
+                "description": "Manage context packs with v3 actions: list/get/write/ttl/delete.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
                             "description": "Operation to perform",
+                            "enum": ["list", "get", "write", "ttl", "delete"]
+                        },
+                        "op": {
+                            "type": "string",
+                            "description": "Write operation kind (v3 transitional router).",
                             "enum": [
-                                "list", "create", "get",
-                                "upsert_section", "delete_section",
-                                "upsert_ref", "delete_ref",
+                                "create",
+                                "upsert_section",
+                                "delete_section",
+                                "upsert_ref",
+                                "delete_ref",
                                 "upsert_diagram",
-                                "set_meta", "set_status",
-                                "delete_pack",
-                                "touch_ttl"
+                                "set_meta",
+                                "set_status"
                             ]
                         },
                         "id": { "type": "string", "description": "Pack ID" },
@@ -27,9 +33,9 @@ pub(super) fn tools_schema() -> Value {
                         "title": { "type": "string" },
                         "brief": { "type": "string", "description": "Short description of the pack" },
                         "tags": { "type": "array", "items": { "type": "string" } },
-                        "ttl_minutes": { "type": "integer", "description": "TTL from now in minutes. Required for create; also used by touch_ttl(set)." },
-                        "extend_minutes": { "type": "integer", "description": "Extend existing TTL by this many minutes (touch_ttl)." },
-                        "expected_revision": { "type": "integer", "description": "Required for mutating actions to prevent lost updates." },
+                        "ttl_minutes": { "type": "integer", "description": "TTL from now in minutes. Required for op=create; also used by action=ttl(set)." },
+                        "extend_minutes": { "type": "integer", "description": "Extend existing TTL by this many minutes (action=ttl)." },
+                        "expected_revision": { "type": "integer", "description": "Required for mutating actions: write/ttl." },
                         "status": { "type": "string", "enum": ["draft", "finalized"] },
                         "freshness": {
                             "type": "string",
@@ -58,13 +64,13 @@ pub(super) fn tools_schema() -> Value {
             },
             {
                 "name": "output",
-                "description": "Render a context pack with real code excerpts in Markdown, or list packs.",
+                "description": "Render v3 output actions: list/read.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["list", "get"]
+                            "enum": ["list", "read"]
                         },
                         "id": { "type": "string", "description": "Pack ID" },
                         "name": { "type": "string", "description": "Pack name" },
