@@ -292,6 +292,25 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
             .collect();
         assert!(listed.contains(&"input"));
         assert!(listed.contains(&"output"));
+        let tools_array = tools["result"]["tools"]
+            .as_array()
+            .context("missing tool entries")?;
+        let input_tool = tools_array
+            .iter()
+            .find(|tool| tool["name"] == "input")
+            .context("missing input tool schema")?;
+        let output_tool = tools_array
+            .iter()
+            .find(|tool| tool["name"] == "output")
+            .context("missing output tool schema")?;
+        assert_eq!(
+            input_tool["inputSchema"]["properties"]["action"]["enum"],
+            json!(["list", "get", "write", "ttl", "delete"])
+        );
+        assert_eq!(
+            output_tool["inputSchema"]["properties"]["action"]["enum"],
+            json!(["list", "read"])
+        );
 
         let created = client
             .call(json!({
@@ -301,7 +320,7 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"create",
+                        "action":"write","op":"create",
                         "name":"e2e-pack",
                         "title":"E2E pack",
                         "brief":"E2E integration test",
@@ -326,7 +345,7 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
                     "name":"input",
                     "arguments":{
                         "id": pack_id.clone(),
-                        "action":"upsert_section",
+                        "action":"write","op":"upsert_section",
                         "expected_revision": revision,
                         "section_key":"scope",
                         "section_title":"Scope",
@@ -346,7 +365,7 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
                     "name":"input",
                     "arguments":{
                         "id": pack_id.clone(),
-                        "action":"upsert_section",
+                        "action":"write","op":"upsert_section",
                         "expected_revision": revision,
                         "section_key":"findings",
                         "section_title":"Findings",
@@ -366,7 +385,7 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
                     "name":"input",
                     "arguments":{
                         "id": pack_id.clone(),
-                        "action":"upsert_ref",
+                        "action":"write","op":"upsert_ref",
                         "expected_revision": revision,
                         "section_key":"findings",
                         "ref_key":"auth_handler",
@@ -390,7 +409,7 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
                     "name":"input",
                     "arguments":{
                         "id": pack_id.clone(),
-                        "action":"upsert_section",
+                        "action":"write","op":"upsert_section",
                         "expected_revision": revision,
                         "section_key":"qa",
                         "section_title":"QA",
@@ -410,7 +429,7 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
                     "name":"input",
                     "arguments":{
                         "id": pack_id.clone(),
-                        "action":"set_status",
+                        "action":"write","op":"set_status",
                         "expected_revision": revision,
                         "status":"finalized"
                     }
@@ -526,7 +545,7 @@ async fn e2e_input_delete_pack_is_deterministic() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"create",
+                        "action":"write","op":"create",
                         "name":"delete-pack",
                         "ttl_minutes": 60
                     }
@@ -550,7 +569,7 @@ async fn e2e_input_delete_pack_is_deterministic() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"delete_pack",
+                        "action":"delete",
                         "id": pack_id
                     }
                 }
@@ -582,7 +601,7 @@ async fn e2e_input_delete_pack_is_deterministic() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"delete_pack",
+                        "action":"delete",
                         "id": pack_path.file_name().unwrap().to_string_lossy().trim_end_matches(".json")
                     }
                 }
@@ -649,6 +668,87 @@ async fn e2e_tool_error_contract_is_machine_readable() -> Result<()> {
 }
 
 #[tokio::test]
+async fn e2e_v3_rejects_legacy_actions_with_invalid_data() -> Result<()> {
+    let dir = tempdir()?;
+    let storage_root = dir.path().join("storage");
+    let source_root = dir.path().join("source");
+    tokio::fs::create_dir_all(&storage_root).await?;
+    tokio::fs::create_dir_all(&source_root).await?;
+
+    let mut client = McpE2EClient::spawn(&storage_root, &source_root).await?;
+
+    let result: Result<()> = async {
+        let _ = client
+            .call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .await?;
+
+        let legacy_input = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"create",
+                        "name":"legacy-cutover-check",
+                        "ttl_minutes":30
+                    }
+                }
+            }))
+            .await?;
+        assert_eq!(legacy_input["result"]["isError"], true);
+        let legacy_input_payload = parse_tool_payload(&legacy_input)?;
+        assert_eq!(legacy_input_payload["code"], "invalid_data");
+        assert!(
+            legacy_input_payload["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not supported in v3"),
+            "legacy input action must return explicit invalid_data"
+        );
+        assert!(
+            legacy_input_payload["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("action='write'"),
+            "legacy input action error must include v3 guidance"
+        );
+
+        let legacy_output = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":3,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"get",
+                        "id":"pk_aaaaaaaa"
+                    }
+                }
+            }))
+            .await?;
+        assert_eq!(legacy_output["result"]["isError"], true);
+        let legacy_output_payload = parse_tool_payload(&legacy_output)?;
+        assert_eq!(legacy_output_payload["code"], "invalid_data");
+        assert!(
+            legacy_output_payload["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("use action='read'"),
+            "legacy output action must return explicit invalid_data guidance"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    client.stop().await?;
+    result
+}
+
+#[tokio::test]
 async fn e2e_request_id_and_revision_conflict_contract() -> Result<()> {
     let dir = tempdir()?;
     let storage_root = dir.path().join("storage");
@@ -671,7 +771,7 @@ async fn e2e_request_id_and_revision_conflict_contract() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"create",
+                        "action":"write","op":"create",
                         "name":"conflict-e2e",
                         "ttl_minutes": 120
                     }
@@ -693,7 +793,7 @@ async fn e2e_request_id_and_revision_conflict_contract() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"upsert_section",
+                        "action":"write","op":"upsert_section",
                         "id": pack_id.clone(),
                         "expected_revision": stale_revision,
                         "section_key":"sec",
@@ -712,7 +812,7 @@ async fn e2e_request_id_and_revision_conflict_contract() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"set_meta",
+                        "action":"write","op":"set_meta",
                         "id": pack_id.clone(),
                         "expected_revision": stale_revision,
                         "title":"new title"
@@ -792,7 +892,7 @@ async fn e2e_request_id_and_revision_conflict_contract() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"set_meta",
+                        "action":"write","op":"set_meta",
                         "id": pack_id,
                         "expected_revision": latest_revision,
                         "title":"resolved-after-reread"
@@ -838,7 +938,7 @@ async fn e2e_finalize_validation_reports_missing_sections_and_invalid_refs() -> 
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"create",
+                        "action":"write","op":"create",
                         "name":"finalize-validation-e2e",
                         "ttl_minutes": 30
                     }
@@ -860,7 +960,7 @@ async fn e2e_finalize_validation_reports_missing_sections_and_invalid_refs() -> 
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"upsert_section",
+                        "action":"write","op":"upsert_section",
                         "id": pack_id.clone(),
                         "expected_revision": revision,
                         "section_key":"scope",
@@ -880,7 +980,7 @@ async fn e2e_finalize_validation_reports_missing_sections_and_invalid_refs() -> 
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"upsert_section",
+                        "action":"write","op":"upsert_section",
                         "id": pack_id.clone(),
                         "expected_revision": revision,
                         "section_key":"findings",
@@ -900,7 +1000,7 @@ async fn e2e_finalize_validation_reports_missing_sections_and_invalid_refs() -> 
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"upsert_ref",
+                        "action":"write","op":"upsert_ref",
                         "id": pack_id.clone(),
                         "expected_revision": revision,
                         "section_key":"findings",
@@ -922,7 +1022,7 @@ async fn e2e_finalize_validation_reports_missing_sections_and_invalid_refs() -> 
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"set_status",
+                        "action":"write","op":"set_status",
                         "id": pack_id.clone(),
                         "expected_revision": revision,
                         "status":"finalized"
@@ -948,7 +1048,7 @@ async fn e2e_finalize_validation_reports_missing_sections_and_invalid_refs() -> 
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"upsert_section",
+                        "action":"write","op":"upsert_section",
                         "id": pack_id.clone(),
                         "expected_revision": revision,
                         "section_key":"qa",
@@ -968,7 +1068,7 @@ async fn e2e_finalize_validation_reports_missing_sections_and_invalid_refs() -> 
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"set_status",
+                        "action":"write","op":"set_status",
                         "id": pack_id,
                         "expected_revision": revision,
                         "status":"finalized"
@@ -1024,7 +1124,7 @@ async fn e2e_touch_ttl_requires_mode_field() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"create",
+                        "action":"write","op":"create",
                         "name":"ttl-mode-pack",
                         "ttl_minutes": 30
                     }
@@ -1046,7 +1146,7 @@ async fn e2e_touch_ttl_requires_mode_field() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"touch_ttl",
+                        "action":"ttl",
                         "id": pack_id,
                         "expected_revision": revision
                     }
@@ -1089,7 +1189,7 @@ async fn e2e_create_requires_ttl_minutes() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"create",
+                        "action":"write","op":"create",
                         "name":"missing-ttl"
                     }
                 }
@@ -1211,7 +1311,7 @@ async fn e2e_output_get_supports_mode_match_paging_and_cursor() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"create",
+                        "action":"write","op":"create",
                         "name":"paging-e2e-pack",
                         "ttl_minutes": 60
                     }
@@ -1233,7 +1333,7 @@ async fn e2e_output_get_supports_mode_match_paging_and_cursor() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"upsert_section",
+                        "action":"write","op":"upsert_section",
                         "id": pack_id.clone(),
                         "expected_revision": revision,
                         "section_key":"flow",
@@ -1253,7 +1353,7 @@ async fn e2e_output_get_supports_mode_match_paging_and_cursor() -> Result<()> {
                     "params":{
                         "name":"input",
                         "arguments":{
-                            "action":"upsert_ref",
+                            "action":"write","op":"upsert_ref",
                             "id": pack_id.clone(),
                             "expected_revision": revision,
                             "section_key":"flow",
@@ -1277,7 +1377,7 @@ async fn e2e_output_get_supports_mode_match_paging_and_cursor() -> Result<()> {
                 "params":{
                     "name":"output",
                     "arguments":{
-                        "action":"get",
+                        "action":"read",
                         "id": pack_id.clone(),
                         "mode":"compact",
                         "match":"TOKEN_0[12]",
@@ -1302,7 +1402,7 @@ async fn e2e_output_get_supports_mode_match_paging_and_cursor() -> Result<()> {
                 "params":{
                     "name":"output",
                     "arguments":{
-                        "action":"get",
+                        "action":"read",
                         "id": pack_id,
                         "cursor": next
                     }
@@ -1355,7 +1455,7 @@ async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Resul
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"create",
+                        "action":"write","op":"create",
                         "name":"bounded-default-pack",
                         "title":"Bounded default pack",
                         "brief":"Routing handoff for bounded compact output",
@@ -1379,7 +1479,7 @@ async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Resul
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"upsert_section",
+                        "action":"write","op":"upsert_section",
                         "id": pack_id.clone(),
                         "expected_revision": revision,
                         "section_key":"routing",
@@ -1399,7 +1499,7 @@ async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Resul
                     "params":{
                         "name":"input",
                         "arguments":{
-                            "action":"upsert_ref",
+                            "action":"write","op":"upsert_ref",
                             "id": pack_id.clone(),
                             "expected_revision": revision,
                             "section_key":"routing",
@@ -1423,7 +1523,7 @@ async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Resul
                 "params":{
                     "name":"output",
                     "arguments":{
-                        "action":"get",
+                        "action":"read",
                         "id": pack_id.clone()
                     }
                 }
@@ -1462,7 +1562,7 @@ async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Resul
                 "params":{
                     "name":"output",
                     "arguments":{
-                        "action":"get",
+                        "action":"read",
                         "id": pack_id.clone(),
                         "cursor": next_cursor
                     }
@@ -1497,7 +1597,7 @@ async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Resul
                 "params":{
                     "name":"output",
                     "arguments":{
-                        "action":"get",
+                        "action":"read",
                         "id": pack_id.clone(),
                         "cursor": next_cursor_page_two
                     }
@@ -1526,7 +1626,7 @@ async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Resul
                 "params":{
                     "name":"output",
                     "arguments":{
-                        "action":"get",
+                        "action":"read",
                         "id": pack_id,
                         "mode":"full"
                     }
@@ -1571,7 +1671,7 @@ async fn e2e_output_get_invalid_regex_returns_validation_error() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"create",
+                        "action":"write","op":"create",
                         "name":"regex-e2e-pack",
                         "ttl_minutes": 60
                     }
@@ -1592,7 +1692,7 @@ async fn e2e_output_get_invalid_regex_returns_validation_error() -> Result<()> {
                 "params":{
                     "name":"output",
                     "arguments":{
-                        "action":"get",
+                        "action":"read",
                         "id": pack_id,
                         "match":"[broken"
                     }
@@ -1639,7 +1739,7 @@ async fn e2e_output_rejects_format_parameter() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"create",
+                        "action":"write","op":"create",
                         "name":"format-pack",
                         "ttl_minutes": 30
                     }
@@ -1707,7 +1807,7 @@ async fn e2e_shutdown_notification_has_no_side_effects() -> Result<()> {
             "params":{
                 "name":"input",
                 "arguments":{
-                    "action":"create",
+                    "action":"write","op":"create",
                     "name":"should-not-exist",
                     "ttl_minutes": 30
                 }
@@ -1781,7 +1881,7 @@ async fn e2e_concurrent_create_same_name_rejects_one_process() -> Result<()> {
         "params":{
             "name":"input",
             "arguments":{
-                "action":"create",
+                "action":"write","op":"create",
                 "name":"same-name",
                 "ttl_minutes": 30
             }
@@ -2006,7 +2106,7 @@ async fn e2e_input_rejects_legacy_alias_fields() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"create",
+                        "action":"write","op":"create",
                         "name":"legacy-alias-pack",
                         "ttl_minutes": 30
                     }
@@ -2028,7 +2128,7 @@ async fn e2e_input_rejects_legacy_alias_fields() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"upsert_section",
+                        "action":"write","op":"upsert_section",
                         "id": pack_id,
                         "expected_revision": revision,
                         "section_key":"flow",
@@ -2147,7 +2247,7 @@ async fn e2e_output_get_name_resolution_metadata_and_ambiguity_candidates() -> R
                 "params":{
                     "name":"output",
                     "arguments":{
-                        "action":"get",
+                        "action":"read",
                         "name":"name-resolve-pack"
                     }
                 }
@@ -2179,7 +2279,7 @@ async fn e2e_output_get_name_resolution_metadata_and_ambiguity_candidates() -> R
                 "params":{
                     "name":"output",
                     "arguments":{
-                        "action":"get",
+                        "action":"read",
                         "id": selected.id.as_str()
                     }
                 }
@@ -2207,7 +2307,7 @@ async fn e2e_output_get_name_resolution_metadata_and_ambiguity_candidates() -> R
                 "params":{
                     "name":"output",
                     "arguments":{
-                        "action":"get",
+                        "action":"read",
                         "name":"ambiguous-e2e-pack"
                     }
                 }
@@ -2261,7 +2361,7 @@ async fn e2e_freshness_metadata_filters_and_warnings() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"create",
+                        "action":"write","op":"create",
                         "name":name,
                         "ttl_minutes":120
                     }
@@ -2400,7 +2500,7 @@ async fn e2e_freshness_metadata_filters_and_warnings() -> Result<()> {
                 "params":{
                     "name":"output",
                     "arguments":{
-                        "action":"get",
+                        "action":"read",
                         "id":expiring_id.as_str()
                     }
                 }
@@ -2479,7 +2579,7 @@ async fn e2e_multi_agent_handoff_compact_full_and_stale_path() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"create",
+                        "action":"write","op":"create",
                         "name":"multi-agent-handoff-pack",
                         "title":"Multi-agent handoff",
                         "brief":"Explorer to orchestrator/reviewer",
@@ -2503,7 +2603,7 @@ async fn e2e_multi_agent_handoff_compact_full_and_stale_path() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"upsert_section",
+                        "action":"write","op":"upsert_section",
                         "id":pack_id.clone(),
                         "expected_revision":revision,
                         "section_key":"scope",
@@ -2523,7 +2623,7 @@ async fn e2e_multi_agent_handoff_compact_full_and_stale_path() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"upsert_section",
+                        "action":"write","op":"upsert_section",
                         "id":pack_id.clone(),
                         "expected_revision":revision,
                         "section_key":"findings",
@@ -2543,7 +2643,7 @@ async fn e2e_multi_agent_handoff_compact_full_and_stale_path() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"upsert_ref",
+                        "action":"write","op":"upsert_ref",
                         "id":pack_id.clone(),
                         "expected_revision":revision,
                         "section_key":"findings",
@@ -2565,7 +2665,7 @@ async fn e2e_multi_agent_handoff_compact_full_and_stale_path() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"upsert_section",
+                        "action":"write","op":"upsert_section",
                         "id":pack_id.clone(),
                         "expected_revision":revision,
                         "section_key":"qa",
@@ -2585,7 +2685,7 @@ async fn e2e_multi_agent_handoff_compact_full_and_stale_path() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"set_status",
+                        "action":"write","op":"set_status",
                         "id":pack_id.clone(),
                         "expected_revision":revision,
                         "status":"finalized"
@@ -2608,7 +2708,7 @@ async fn e2e_multi_agent_handoff_compact_full_and_stale_path() -> Result<()> {
                 "params":{
                     "name":"output",
                     "arguments":{
-                        "action":"get",
+                        "action":"read",
                         "id":pack_id.clone()
                     }
                 }
@@ -2632,7 +2732,7 @@ async fn e2e_multi_agent_handoff_compact_full_and_stale_path() -> Result<()> {
                 "params":{
                     "name":"output",
                     "arguments":{
-                        "action":"get",
+                        "action":"read",
                         "id":pack_id.clone(),
                         "mode":"full"
                     }
@@ -2652,7 +2752,7 @@ async fn e2e_multi_agent_handoff_compact_full_and_stale_path() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"create",
+                        "action":"write","op":"create",
                         "name":"multi-agent-stale-pack",
                         "ttl_minutes":120
                     }

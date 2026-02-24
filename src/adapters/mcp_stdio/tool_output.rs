@@ -25,7 +25,7 @@ pub(super) async fn handle_output_tool(
     let action = args
         .get("action")
         .and_then(|v| v.as_str())
-        .unwrap_or(if has_identity { "get" } else { "list" });
+        .unwrap_or(if has_identity { "read" } else { "list" });
 
     match action {
         "list" => {
@@ -39,17 +39,14 @@ pub(super) async fn handle_output_tool(
                 .await?;
             tool_text_success(format_pack_list_markdown(&packs))
         }
-        "get" => {
+        "read" => {
             let ident = req_identifier(args)?;
             let request = build_output_get_request(args)?;
             let out_str = uc.get_rendered_with_request(&ident, request).await?;
             let out_str = append_selection_metadata(&ident, out_str);
             tool_text_success(out_str)
         }
-        _ => Err(DomainError::InvalidData(format!(
-            "unknown output action '{}'",
-            action
-        ))),
+        _ => Err(unsupported_output_action(action)),
     }
 }
 
@@ -94,6 +91,19 @@ fn output_mode_opt(args: &Value) -> Result<Option<OutputMode>, DomainError> {
         return Ok(None);
     };
     Ok(Some(raw.parse::<OutputMode>()?))
+}
+
+fn unsupported_output_action(action: &str) -> DomainError {
+    if action == "get" {
+        DomainError::InvalidData(
+            "output action 'get' is not supported in v3; use action='read'".into(),
+        )
+    } else {
+        DomainError::InvalidData(format!(
+            "unknown output action '{}'; allowed actions: list, read",
+            action
+        ))
+    }
 }
 
 fn build_output_get_request(args: &Value) -> Result<OutputGetRequest, DomainError> {
