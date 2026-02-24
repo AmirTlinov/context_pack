@@ -302,29 +302,12 @@ pub(super) fn req_identifier(args: &Value) -> Result<String, DomainError> {
     })
 }
 
-pub(super) fn req_str(args: &Value, key: &str) -> Result<String, DomainError> {
-    args.get(key)
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| DomainError::InvalidData(format!("'{}' is required", key)))
-}
-
 pub(super) fn str_opt(args: &Value, key: &str) -> Option<String> {
     args.get(key)
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-}
-
-pub(super) fn req_usize(args: &Value, key: &str) -> Result<usize, DomainError> {
-    let raw = args
-        .get(key)
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| DomainError::InvalidData(format!("'{}' is required", key)))?;
-    usize::try_from(raw).map_err(|_| DomainError::InvalidData(format!("'{}' is out of range", key)))
 }
 
 pub(super) fn usize_opt(args: &Value, key: &str) -> Result<Option<usize>, DomainError> {
@@ -352,11 +335,6 @@ pub(super) fn u64_opt(args: &Value, key: &str) -> Result<Option<u64>, DomainErro
         .ok_or_else(|| DomainError::InvalidData(format!("'{}' must be an integer", key)))
 }
 
-pub(super) fn req_status(args: &Value, key: &str) -> Result<Status, DomainError> {
-    let raw = req_str(args, key)?;
-    raw.parse::<Status>()
-}
-
 pub(super) fn status_opt(args: &Value, key: &str) -> Result<Option<Status>, DomainError> {
     let Some(raw) = str_opt(args, key) else {
         return Ok(None);
@@ -372,26 +350,6 @@ pub(super) fn freshness_opt(
         return Ok(None);
     };
     Ok(Some(raw.parse::<FreshnessState>()?))
-}
-
-pub(super) fn tags_opt(args: &Value) -> Result<Option<Vec<String>>, DomainError> {
-    let Some(raw_tags) = args.get("tags") else {
-        return Ok(None);
-    };
-    let array = raw_tags
-        .as_array()
-        .ok_or_else(|| DomainError::InvalidData("'tags' must be an array of strings".into()))?;
-    let mut tags = Vec::with_capacity(array.len());
-    for item in array {
-        let value = item
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| DomainError::InvalidData("all tags must be non-empty strings".into()))?
-            .to_string();
-        tags.push(value);
-    }
-    Ok(Some(tags))
 }
 
 #[cfg(test)]
