@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt::{self, Write as FmtWrite};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -95,9 +96,14 @@ struct RenderChunk {
     section_key: String,
     section_description: Option<String>,
     kind: ChunkKind,
+    ref_key: Option<String>,
+    stale_ref: bool,
     body_markdown: String,
     searchable_text: String,
 }
+
+const COMPACT_SIGNAL_LIMIT: usize = 3;
+const COMPACT_NAV_HINT_LIMIT: usize = 5;
 
 pub struct OutputUseCases {
     repo: Arc<dyn PackRepositoryPort>,
@@ -407,6 +413,9 @@ impl OutputUseCases {
         }
 
         out.push_str("\n[CONTENT]\n");
+        if args.mode == OutputMode::Compact {
+            write_compact_handoff_summary(&mut out, pack, &chunks, page_chunks, has_more);
+        }
 
         let mut current_section_key: Option<&str> = None;
         let mut current_group: Option<&str> = None;
@@ -505,6 +514,8 @@ impl OutputUseCases {
                         kind: ChunkKind::Ref {
                             group: group_name.clone(),
                         },
+                        ref_key: Some(r.key.as_str().to_string()),
+                        stale_ref: body_markdown.contains("> stale ref:"),
                         body_markdown,
                         searchable_text,
                     });
@@ -529,6 +540,8 @@ impl OutputUseCases {
                     section_key: section_key.clone(),
                     section_description: section_description.clone(),
                     kind: ChunkKind::Diagram,
+                    ref_key: None,
+                    stale_ref: false,
                     body_markdown,
                     searchable_text,
                 });
@@ -575,6 +588,261 @@ fn write_legend_header(out: &mut String, pack: &Pack) {
     if let Some(brief) = &pack.brief {
         let _ = writeln!(out, "- brief: {}", brief);
     }
+}
+
+fn write_compact_handoff_summary(
+    out: &mut String,
+    pack: &Pack,
+    filtered_chunks: &[RenderChunk],
+    page_chunks: &[RenderChunk],
+    has_more: bool,
+) {
+    let now = chrono::Utc::now();
+    let freshness_state = FreshnessState::from_pack(pack, now);
+    let objective = pack
+        .title
+        .as_deref()
+        .or(pack.name.as_ref().map(|name| name.as_str()))
+        .unwrap_or("Untitled")
+        .to_string();
+    let scope = compact_scope(pack);
+    let risks = compact_risk_signals(pack, filtered_chunks, freshness_state);
+    let gaps = compact_gap_signals(pack, has_more);
+    let sections = compact_section_hints(pack);
+    let refs_on_page = compact_ref_hints(page_chunks);
+
+    out.push_str("\n## Handoff summary [handoff]\n");
+    let _ = writeln!(out, "- objective: {}", objective);
+    let _ = writeln!(out, "- scope: {}", scope);
+    let _ = writeln!(
+        out,
+        "- verdict_status: status={}, freshness_state={}",
+        pack.status, freshness_state
+    );
+    let _ = writeln!(
+        out,
+        "- freshness: expires_at={}, ttl_remaining={}",
+        pack.expires_at.to_rfc3339(),
+        pack.ttl_remaining_human(now)
+    );
+    out.push_str("- top_risks:\n");
+    for risk in risks {
+        let _ = writeln!(out, "  - {}", risk);
+    }
+    out.push_str("- top_gaps:\n");
+    for gap in gaps {
+        let _ = writeln!(out, "  - {}", gap);
+    }
+    out.push_str("- deep_nav_hints:\n");
+    let _ = writeln!(
+        out,
+        "  - full_evidence: output get {{\"action\":\"get\",\"id\":\"{}\",\"mode\":\"full\"}}",
+        pack.id
+    );
+    if has_more {
+        out.push_str("  - continue_compact: call output get with LEGEND `next` cursor\n");
+    }
+    let _ = writeln!(
+        out,
+        "  - sections: {}",
+        if sections.is_empty() {
+            "none".to_string()
+        } else {
+            sections.join(", ")
+        }
+    );
+    let _ = writeln!(
+        out,
+        "  - refs_on_page: {}",
+        if refs_on_page.is_empty() {
+            "none".to_string()
+        } else {
+            refs_on_page.join(", ")
+        }
+    );
+}
+
+fn compact_scope(pack: &Pack) -> String {
+    if let Some(brief) = &pack.brief {
+        if !brief.trim().is_empty() {
+            return brief.trim().to_string();
+        }
+    }
+
+    let mut section_titles = pack
+        .sections
+        .iter()
+        .map(|section| section.title.trim())
+        .filter(|title| !title.is_empty())
+        .take(COMPACT_NAV_HINT_LIMIT)
+        .collect::<Vec<_>>();
+    if section_titles.is_empty() {
+        "scope is not explicitly documented in pack brief".to_string()
+    } else {
+        section_titles.dedup();
+        format!("sections in scope: {}", section_titles.join(", "))
+    }
+}
+
+fn compact_risk_signals(
+    pack: &Pack,
+    filtered_chunks: &[RenderChunk],
+    freshness_state: FreshnessState,
+) -> Vec<String> {
+    let mut risks = Vec::new();
+
+    if let Some(warning) = freshness_state.warning_text() {
+        risks.push(format!("freshness: {}", warning));
+    }
+
+    let stale_ref_keys = filtered_chunks
+        .iter()
+        .filter(|chunk| chunk.stale_ref)
+        .filter_map(|chunk| chunk.ref_key.as_deref())
+        .take(COMPACT_SIGNAL_LIMIT)
+        .collect::<Vec<_>>();
+    if !stale_ref_keys.is_empty() {
+        risks.push(format!("stale refs: {}", stale_ref_keys.join(", ")));
+    }
+
+    risks.extend(keyword_signals(
+        pack,
+        &[
+            "risk", "risky", "blocker", "critical", "incident", "warning",
+        ],
+        COMPACT_SIGNAL_LIMIT.saturating_sub(risks.len()),
+    ));
+
+    if risks.is_empty() {
+        risks.push("none explicitly signaled".to_string());
+    }
+    risks.truncate(COMPACT_SIGNAL_LIMIT);
+    risks
+}
+
+fn compact_gap_signals(pack: &Pack, has_more: bool) -> Vec<String> {
+    let mut gaps = keyword_signals(
+        pack,
+        &[
+            "gap",
+            "missing",
+            "unknown",
+            "todo",
+            "tbd",
+            "follow-up",
+            "followup",
+            "fixme",
+        ],
+        COMPACT_SIGNAL_LIMIT,
+    );
+
+    if has_more && gaps.len() < COMPACT_SIGNAL_LIMIT {
+        gaps.push("compact page is partial; continue via LEGEND next cursor".to_string());
+    }
+
+    if gaps.is_empty() {
+        gaps.push("none explicitly tagged".to_string());
+    }
+
+    gaps.truncate(COMPACT_SIGNAL_LIMIT);
+    gaps
+}
+
+fn compact_section_hints(pack: &Pack) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut sections = Vec::new();
+    for section in &pack.sections {
+        let hint = format!("{}[{}]", section.title, section.key);
+        if seen.insert(hint.clone()) {
+            sections.push(hint);
+        }
+        if sections.len() >= COMPACT_NAV_HINT_LIMIT {
+            break;
+        }
+    }
+    sections
+}
+
+fn compact_ref_hints(page_chunks: &[RenderChunk]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut refs = Vec::new();
+    for chunk in page_chunks {
+        let Some(ref_key) = &chunk.ref_key else {
+            continue;
+        };
+        if seen.insert(ref_key.clone()) {
+            refs.push(ref_key.clone());
+        }
+        if refs.len() >= COMPACT_NAV_HINT_LIMIT {
+            break;
+        }
+    }
+    refs
+}
+
+fn keyword_signals(pack: &Pack, keywords: &[&str], limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut seen_normalized = BTreeSet::new();
+    let mut out = Vec::new();
+    for candidate in pack_text_candidates(pack) {
+        let normalized = candidate.to_lowercase();
+        if !keywords.iter().any(|keyword| normalized.contains(keyword)) {
+            continue;
+        }
+        if !seen_normalized.insert(normalized) {
+            continue;
+        }
+        out.push(truncate_signal(candidate, 140));
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out
+}
+
+fn pack_text_candidates(pack: &Pack) -> Vec<&str> {
+    let mut out = Vec::new();
+    if let Some(brief) = pack.brief.as_deref() {
+        out.push(brief);
+    }
+    for section in &pack.sections {
+        out.push(section.title.as_str());
+        if let Some(description) = section.description.as_deref() {
+            out.push(description);
+        }
+        for code_ref in &section.refs {
+            out.push(code_ref.key.as_str());
+            if let Some(title) = code_ref.title.as_deref() {
+                out.push(title);
+            }
+            if let Some(why) = code_ref.why.as_deref() {
+                out.push(why);
+            }
+        }
+        for diagram in &section.diagrams {
+            out.push(diagram.title.as_str());
+            if let Some(why) = diagram.why.as_deref() {
+                out.push(why);
+            }
+        }
+    }
+    out
+}
+
+fn truncate_signal(raw: &str, max_chars: usize) -> String {
+    let compact = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+    let mut out = String::new();
+    for ch in compact.chars().take(max_chars.saturating_sub(1)) {
+        out.push(ch);
+    }
+    out.push('…');
+    out
 }
 
 fn invalid_cursor(reason: impl Into<String>) -> DomainError {

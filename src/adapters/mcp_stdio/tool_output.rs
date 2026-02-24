@@ -9,6 +9,8 @@ use crate::domain::types::PackId;
 
 use super::{freshness_opt, req_identifier, status_opt, str_opt, tool_text_success, usize_opt};
 
+const DEFAULT_COMPACT_LIMIT: usize = 6;
+
 pub(super) async fn handle_output_tool(
     args: &Value,
     uc: &OutputUseCases,
@@ -39,14 +41,7 @@ pub(super) async fn handle_output_tool(
         }
         "get" => {
             let ident = req_identifier(args)?;
-            let request = OutputGetRequest {
-                status_filter: status_opt(args, "status")?,
-                mode: output_mode_opt(args)?,
-                limit: usize_opt(args, "limit")?,
-                offset: usize_opt(args, "offset")?,
-                cursor: str_opt(args, "cursor"),
-                match_regex: str_opt(args, "match"),
-            };
+            let request = build_output_get_request(args)?;
             let out_str = uc.get_rendered_with_request(&ident, request).await?;
             let out_str = append_selection_metadata(&ident, out_str);
             tool_text_success(out_str)
@@ -99,6 +94,43 @@ fn output_mode_opt(args: &Value) -> Result<Option<OutputMode>, DomainError> {
         return Ok(None);
     };
     Ok(Some(raw.parse::<OutputMode>()?))
+}
+
+fn build_output_get_request(args: &Value) -> Result<OutputGetRequest, DomainError> {
+    let status_filter = status_opt(args, "status")?;
+    let explicit_mode = output_mode_opt(args)?;
+    let limit = usize_opt(args, "limit")?;
+    let offset = usize_opt(args, "offset")?;
+    let cursor = str_opt(args, "cursor");
+    let match_regex = str_opt(args, "match");
+
+    let (mode, limit) = apply_default_compact_handoff_mode(explicit_mode, limit, cursor.as_deref());
+
+    Ok(OutputGetRequest {
+        status_filter,
+        mode,
+        limit,
+        offset,
+        cursor,
+        match_regex,
+    })
+}
+
+fn apply_default_compact_handoff_mode(
+    explicit_mode: Option<OutputMode>,
+    limit: Option<usize>,
+    cursor: Option<&str>,
+) -> (Option<OutputMode>, Option<usize>) {
+    if explicit_mode.is_some() {
+        return (explicit_mode, limit);
+    }
+
+    if cursor.is_some() {
+        return (None, limit);
+    }
+
+    let compact_limit = Some(limit.unwrap_or(DEFAULT_COMPACT_LIMIT));
+    (Some(OutputMode::Compact), compact_limit)
 }
 
 fn append_selection_metadata(identifier: &str, markdown: String) -> String {
@@ -218,7 +250,14 @@ fn legend_value(markdown: &str, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_selection_metadata, legend_lines, legend_value};
+    use serde_json::json;
+
+    use crate::app::output_usecases::OutputMode;
+
+    use super::{
+        append_selection_metadata, apply_default_compact_handoff_mode, build_output_get_request,
+        legend_lines, legend_value, DEFAULT_COMPACT_LIMIT,
+    };
 
     #[test]
     fn selected_metadata_remains_present_when_content_contains_marker_substrings() {
@@ -293,5 +332,53 @@ noop
             legend_value(&rendered, "selected_status").as_deref(),
             Some("draft")
         );
+    }
+
+    #[test]
+    fn default_output_get_uses_compact_handoff_with_bounded_limit() {
+        let request = build_output_get_request(&json!({ "id": "pk_aaaaaaaa" }))
+            .expect("default request must parse");
+        assert_eq!(request.mode, Some(OutputMode::Compact));
+        assert_eq!(request.limit, Some(DEFAULT_COMPACT_LIMIT));
+    }
+
+    #[test]
+    fn explicit_full_mode_keeps_unbounded_behavior() {
+        let request = build_output_get_request(&json!({
+            "id": "pk_aaaaaaaa",
+            "mode": "full"
+        }))
+        .expect("explicit mode request must parse");
+        assert_eq!(request.mode, Some(OutputMode::Full));
+        assert_eq!(request.limit, None);
+    }
+
+    #[test]
+    fn cursor_without_explicit_mode_keeps_cursor_mode_contract() {
+        let request = build_output_get_request(&json!({
+            "id": "pk_aaaaaaaa",
+            "cursor": "v1:deadbeef"
+        }))
+        .expect("cursor request must parse");
+        assert_eq!(request.mode, None);
+        assert_eq!(request.limit, None);
+    }
+
+    #[test]
+    fn helper_applies_default_limit_only_when_needed() {
+        let (defaulted_mode, defaulted_limit) =
+            apply_default_compact_handoff_mode(None, None, None);
+        assert_eq!(defaulted_mode, Some(OutputMode::Compact));
+        assert_eq!(defaulted_limit, Some(DEFAULT_COMPACT_LIMIT));
+
+        let (explicit_limit_mode, explicit_limit) =
+            apply_default_compact_handoff_mode(None, Some(7), None);
+        assert_eq!(explicit_limit_mode, Some(OutputMode::Compact));
+        assert_eq!(explicit_limit, Some(7));
+
+        let (cursor_mode, cursor_limit) =
+            apply_default_compact_handoff_mode(None, None, Some("v1:x"));
+        assert_eq!(cursor_mode, None);
+        assert_eq!(cursor_limit, None);
     }
 }
