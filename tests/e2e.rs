@@ -393,22 +393,49 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
                 }
             }))
             .await?;
-        let rendered = output
+        let rendered_compact = output
             .get("result")
             .and_then(|r| r.get("content"))
             .and_then(|v| v.get(0))
             .and_then(|v| v.get("text"))
             .and_then(Value::as_str)
             .context("missing rendered markdown output")?;
-        assert!(rendered.contains("[LEGEND]"));
-        assert!(rendered.contains("login handler"));
-        assert!(rendered.contains("token = \"ok\""));
-        assert!(rendered.contains("ttl_remaining"));
+        assert!(rendered_compact.contains("[LEGEND]"));
+        assert!(rendered_compact.contains("- mode: compact"));
+        assert!(rendered_compact.contains("- paging: active"));
+        assert!(rendered_compact.contains("- limit: 6"));
+        assert!(rendered_compact.contains("## Handoff summary [handoff]"));
+        assert!(rendered_compact.contains("login handler"));
+        assert!(!rendered_compact.contains("token = \"ok\""));
+        assert!(rendered_compact.contains("ttl_remaining"));
 
-        let listed = client
+        let output_full = client
             .call(json!({
                 "jsonrpc":"2.0",
                 "id":8,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "id": pack_id.clone(),
+                        "mode":"full"
+                    }
+                }
+            }))
+            .await?;
+        let rendered_full = output_full
+            .get("result")
+            .and_then(|r| r.get("content"))
+            .and_then(|v| v.get(0))
+            .and_then(|v| v.get("text"))
+            .and_then(Value::as_str)
+            .context("missing full rendered markdown output")?;
+        assert!(rendered_full.contains("token = \"ok\""));
+        assert!(rendered_full.contains("```rust"));
+        let listed = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":9,
                 "method":"tools/call",
                 "params":{
                     "name":"output",
@@ -993,6 +1020,228 @@ async fn e2e_output_get_supports_mode_match_paging_and_cursor() -> Result<()> {
         assert_eq!(legend_value(markdown2, "next").as_deref(), Some("null"));
         assert_eq!(rendered_ref_keys(markdown2), vec!["ref-02"]);
         assert!(!markdown2.contains("ref-03"));
+
+        Ok(())
+    }
+    .await;
+
+    client.stop().await?;
+    result
+}
+
+#[tokio::test]
+async fn e2e_output_get_default_compact_is_bounded_and_full_preserved() -> Result<()> {
+    let dir = tempdir()?;
+    let storage_root = dir.path().join("storage");
+    let source_root = dir.path().join("source");
+    tokio::fs::create_dir_all(&storage_root).await?;
+    tokio::fs::create_dir_all(&source_root).await?;
+
+    let source_body = (1_u32..=15_u32)
+        .map(|idx| format!("fn step_{idx:02}() {{ let token = \"TOKEN_{idx:02}\"; }}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    tokio::fs::write(source_root.join("bounded.rs"), format!("{source_body}\n")).await?;
+
+    let mut client = McpE2EClient::spawn(&storage_root, &source_root).await?;
+
+    let result: Result<()> = async {
+        let _ = client
+            .call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .await?;
+
+        let created = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"create",
+                        "name":"bounded-default-pack",
+                        "title":"Bounded default pack",
+                        "brief":"Routing handoff for bounded compact output",
+                        "ttl_minutes": 60
+                    }
+                }
+            }))
+            .await?;
+        let created_payload = parse_tool_payload(&created)?;
+        let pack_id = created_payload["payload"]["id"]
+            .as_str()
+            .context("missing created pack id")?
+            .to_string();
+        let mut revision = payload_pack_revision(&created_payload)?;
+
+        let section = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":3,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"upsert_section",
+                        "id": pack_id.clone(),
+                        "expected_revision": revision,
+                        "section_key":"routing",
+                        "section_title":"Routing"
+                    }
+                }
+            }))
+            .await?;
+        revision = payload_pack_revision(&parse_tool_payload(&section)?)?;
+
+        for idx in 1_u32..=15_u32 {
+            let updated = client
+                .call(json!({
+                    "jsonrpc":"2.0",
+                    "id": format!("bounded-ref-{}", idx),
+                    "method":"tools/call",
+                    "params":{
+                        "name":"input",
+                        "arguments":{
+                            "action":"upsert_ref",
+                            "id": pack_id.clone(),
+                            "expected_revision": revision,
+                            "section_key":"routing",
+                            "ref_key": format!("ref-{idx:02}"),
+                            "path":"bounded.rs",
+                            "line_start": idx,
+                            "line_end": idx
+                        }
+                    }
+                }))
+                .await?;
+            revision = payload_pack_revision(&parse_tool_payload(&updated)?)?;
+        }
+        assert!(revision >= 17);
+
+        let compact_default = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":4,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"get",
+                        "id": pack_id.clone()
+                    }
+                }
+            }))
+            .await?;
+        let compact_markdown = output_markdown(&compact_default)?;
+        assert!(compact_markdown.contains("- mode: compact"));
+        assert!(compact_markdown.contains("- paging: active"));
+        assert!(compact_markdown.contains("- limit: 6"));
+        assert_eq!(
+            legend_value(compact_markdown, "has_more").as_deref(),
+            Some("true")
+        );
+        assert!(compact_markdown.contains("## Handoff summary [handoff]"));
+        assert!(compact_markdown.contains("- objective:"));
+        assert!(compact_markdown.contains("- scope:"));
+        assert!(compact_markdown.contains("- verdict_status:"));
+        assert!(compact_markdown.contains("- top_risks:"));
+        assert!(compact_markdown.contains("- top_gaps:"));
+        assert!(compact_markdown.contains("- deep_nav_hints:"));
+        assert!(!compact_markdown.contains("```rust"));
+        assert_eq!(
+            rendered_ref_keys(compact_markdown).len(),
+            6,
+            "default compact handoff must be bounded by default page size"
+        );
+        let next_cursor = legend_value(compact_markdown, "next")
+            .filter(|value| value != "null")
+            .context("default compact page should expose next cursor for remainder")?;
+
+        let compact_page_two = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":5,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"get",
+                        "id": pack_id.clone(),
+                        "cursor": next_cursor
+                    }
+                }
+            }))
+            .await?;
+        let compact_page_two_markdown = output_markdown(&compact_page_two)?;
+        assert_eq!(
+            rendered_ref_keys(compact_page_two_markdown),
+            vec![
+                "ref-07".to_string(),
+                "ref-08".to_string(),
+                "ref-09".to_string(),
+                "ref-10".to_string(),
+                "ref-11".to_string(),
+                "ref-12".to_string()
+            ]
+        );
+        assert_eq!(
+            legend_value(compact_page_two_markdown, "has_more").as_deref(),
+            Some("true")
+        );
+        let next_cursor_page_two = legend_value(compact_page_two_markdown, "next")
+            .filter(|value| value != "null")
+            .context("second compact page should still expose next cursor")?;
+
+        let compact_page_three = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":6,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"get",
+                        "id": pack_id.clone(),
+                        "cursor": next_cursor_page_two
+                    }
+                }
+            }))
+            .await?;
+        let compact_page_three_markdown = output_markdown(&compact_page_three)?;
+        assert_eq!(
+            rendered_ref_keys(compact_page_three_markdown),
+            vec![
+                "ref-13".to_string(),
+                "ref-14".to_string(),
+                "ref-15".to_string()
+            ]
+        );
+        assert_eq!(
+            legend_value(compact_page_three_markdown, "next").as_deref(),
+            Some("null")
+        );
+
+        let full = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":7,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"get",
+                        "id": pack_id,
+                        "mode":"full"
+                    }
+                }
+            }))
+            .await?;
+        let full_markdown = output_markdown(&full)?;
+        assert!(full_markdown.contains("```rust"));
+        assert!(
+            compact_markdown.len() < full_markdown.len(),
+            "compact default should be materially smaller than full output"
+        );
 
         Ok(())
     }

@@ -81,7 +81,7 @@ pub(super) fn tools_schema() -> Value {
                         "mode": {
                             "type": "string",
                             "enum": ["full", "compact"],
-                            "description": "Render mode for output get (default: full)"
+                            "description": "Render mode for output get (default: compact handoff page; use full for complete snippets)"
                         },
                         "query": { "type": "string", "description": "Optional text search for list" },
                         "cursor": { "type": "string", "description": "Opaque cursor returned by output get paging metadata" },

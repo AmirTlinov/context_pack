@@ -1097,6 +1097,114 @@ async fn test_output_get_compact_mode_omits_code_but_keeps_metadata_and_stale_ma
     assert!(compact.contains("- lines: 9-9"));
     assert!(compact.contains("> stale ref:"));
     assert!(!compact.contains("```rust"));
+    assert!(compact.contains("## Handoff summary [handoff]"));
+    assert!(compact.contains("- objective:"));
+    assert!(compact.contains("- scope:"));
+    assert!(compact.contains("- verdict_status:"));
+    assert!(compact.contains("- top_risks:"));
+    assert!(compact.contains("- top_gaps:"));
+    assert!(compact.contains("- freshness:"));
+    assert!(compact.contains("- deep_nav_hints:"));
+}
+
+#[tokio::test]
+async fn test_output_get_compact_mode_is_materially_smaller_than_full() {
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("packs");
+    let source_root = tmp.path().join("src");
+    std::fs::create_dir_all(&source_root).unwrap();
+
+    let (input_uc, output_uc) = build_services(storage_dir, tmp.path().to_path_buf());
+    let file = source_root.join("heavy.rs");
+    let repetitive_payload = "let payload = \"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\"; ".repeat(6);
+    let heavy_source = (1..=12)
+        .map(|i| {
+            format!(
+                "fn step_{i:02}() {{ {} let token = \"TOKEN_{i:02}\"; }}\n",
+                repetitive_payload
+            )
+        })
+        .collect::<String>();
+    std::fs::write(&file, heavy_source).unwrap();
+
+    let pack = input_uc
+        .create_with_tags_ttl(
+            Some("size-pack".into()),
+            Some("Size pack".into()),
+            None,
+            None,
+            30,
+        )
+        .await
+        .unwrap();
+    let id = pack.id.as_str().to_string();
+    let mut revision = pack.revision;
+
+    let pack = input_uc
+        .upsert_section_checked(
+            &id,
+            "sec-heavy",
+            "Heavy Section".into(),
+            Some("size comparison".into()),
+            None,
+            revision,
+        )
+        .await
+        .unwrap();
+    revision = pack.revision;
+
+    for idx in 1..=12 {
+        let pack = input_uc
+            .upsert_ref_checked(
+                &id,
+                UpsertRefRequest {
+                    section_key: "sec-heavy".into(),
+                    ref_key: format!("ref-{idx:02}"),
+                    path: "src/heavy.rs".into(),
+                    line_start: idx,
+                    line_end: idx,
+                    title: Some(format!("Heavy ref {idx:02}")),
+                    why: Some("size check".into()),
+                    group: None,
+                },
+                revision,
+            )
+            .await
+            .unwrap();
+        revision = pack.revision;
+    }
+
+    let full = output_uc
+        .get_rendered_with_request(
+            &id,
+            OutputGetRequest {
+                mode: Some(OutputMode::Full),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let compact = output_uc
+        .get_rendered_with_request(
+            &id,
+            OutputGetRequest {
+                mode: Some(OutputMode::Compact),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        compact.len() < full.len(),
+        "compact mode must be smaller than full mode"
+    );
+    assert!(
+        compact.len() * 100 <= full.len() * 80,
+        "compact mode should be materially smaller (<=80% of full): compact={}, full={}",
+        compact.len(),
+        full.len()
+    );
 }
 
 #[tokio::test]
