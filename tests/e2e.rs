@@ -1691,3 +1691,215 @@ async fn e2e_output_get_name_resolution_metadata_and_ambiguity_candidates() -> R
     client.stop().await?;
     result
 }
+
+#[tokio::test]
+async fn e2e_freshness_metadata_filters_and_warnings() -> Result<()> {
+    let dir = tempdir()?;
+    let storage_root = dir.path().join("storage");
+    let source_root = dir.path().join("source");
+    tokio::fs::create_dir_all(&storage_root).await?;
+    tokio::fs::create_dir_all(&source_root).await?;
+
+    let mut client = McpE2EClient::spawn(&storage_root, &source_root).await?;
+
+    let result: Result<()> = async {
+        let _ = client
+            .call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .await?;
+
+        let create_pack = |request_id: i64, name: &str| {
+            json!({
+                "jsonrpc":"2.0",
+                "id":request_id,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"create",
+                        "name":name,
+                        "ttl_minutes":120
+                    }
+                }
+            })
+        };
+
+        let created_fresh = parse_tool_payload(&client.call(create_pack(2, "fresh-pack")).await?)?;
+        let created_expiring =
+            parse_tool_payload(&client.call(create_pack(3, "expiring-pack")).await?)?;
+        let created_expired =
+            parse_tool_payload(&client.call(create_pack(4, "expired-pack")).await?)?;
+
+        let fresh_id = created_fresh["payload"]["id"]
+            .as_str()
+            .context("missing fresh id")?
+            .to_string();
+        let expiring_id = created_expiring["payload"]["id"]
+            .as_str()
+            .context("missing expiring id")?
+            .to_string();
+        let expired_id = created_expired["payload"]["id"]
+            .as_str()
+            .context("missing expired id")?
+            .to_string();
+
+        let patch_expiry = |pack_id: &str, expires_at: chrono::DateTime<Utc>| -> Result<()> {
+            let path = storage_root.join("packs").join(format!("{}.json", pack_id));
+            let raw = std::fs::read_to_string(&path)?;
+            let mut value: Value = serde_json::from_str(&raw)?;
+            value["expires_at"] = Value::String(expires_at.to_rfc3339());
+            std::fs::write(path, serde_json::to_string(&value)?)?;
+            Ok(())
+        };
+
+        patch_expiry(&expiring_id, Utc::now() + Duration::seconds(60))?;
+        patch_expiry(&expired_id, Utc::now() - Duration::seconds(5))?;
+
+        let input_list_default = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":5,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{"action":"list"}
+                }
+            }))
+            .await?;
+        let input_list_payload = parse_tool_payload(&input_list_default)?;
+        let packs = input_list_payload["payload"]["packs"]
+            .as_array()
+            .context("missing input list packs")?;
+        assert!(
+            packs
+                .iter()
+                .all(|pack| pack.get("freshness_state").is_some()),
+            "input list must include normalized freshness_state"
+        );
+        assert!(
+            packs.iter().all(|pack| pack.get("ttl_remaining").is_some()),
+            "input list must include stable ttl_remaining field"
+        );
+        assert!(
+            packs
+                .iter()
+                .all(|pack| pack.get("id").and_then(Value::as_str) != Some(expired_id.as_str())),
+            "default stale-safe list must hide expired packs"
+        );
+        assert!(
+            packs
+                .iter()
+                .any(|pack| pack.get("id").and_then(Value::as_str) == Some(fresh_id.as_str())),
+            "fresh pack should remain visible in stale-safe default list"
+        );
+
+        let input_list_expired = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":6,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"list",
+                        "freshness":"expired"
+                    }
+                }
+            }))
+            .await?;
+        let expired_payload = parse_tool_payload(&input_list_expired)?;
+        let expired_packs = expired_payload["payload"]["packs"]
+            .as_array()
+            .context("missing expired filter packs")?;
+        assert_eq!(
+            expired_packs.len(),
+            1,
+            "expired filter should isolate stale pack"
+        );
+        assert_eq!(expired_packs[0]["id"], Value::String(expired_id.clone()));
+        assert_eq!(
+            expired_packs[0]["freshness_state"],
+            Value::String("expired".into())
+        );
+
+        let input_get = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":7,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"get",
+                        "id":expiring_id.as_str()
+                    }
+                }
+            }))
+            .await?;
+        let input_get_payload = parse_tool_payload(&input_get)?;
+        assert_eq!(
+            input_get_payload["payload"]["freshness_state"],
+            Value::String("expiring_soon".into())
+        );
+        assert!(
+            input_get_payload["payload"].get("ttl_remaining").is_some()
+                && input_get_payload["payload"].get("expires_at").is_some(),
+            "input get must expose stable freshness summary fields"
+        );
+
+        let output_get = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":8,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"get",
+                        "id":expiring_id.as_str()
+                    }
+                }
+            }))
+            .await?;
+        let output_markdown_expiring = output_markdown(&output_get)?;
+        assert_eq!(
+            legend_value(output_markdown_expiring, "freshness_state").as_deref(),
+            Some("expiring_soon")
+        );
+        assert!(
+            legend_value(output_markdown_expiring, "warning")
+                .as_deref()
+                .is_some_and(|warning| warning.contains("expiring soon")),
+            "output get legend must include expiring warning"
+        );
+
+        let output_list_expired = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":9,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"list",
+                        "freshness":"expired"
+                    }
+                }
+            }))
+            .await?;
+        let expired_markdown = output_markdown(&output_list_expired)?;
+        assert!(
+            expired_markdown.contains(&expired_id),
+            "output list freshness=expired must surface expired pack"
+        );
+        assert!(
+            expired_markdown.contains("warning: expired"),
+            "human-readable output must warn about expired packs"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    client.stop().await?;
+    result
+}

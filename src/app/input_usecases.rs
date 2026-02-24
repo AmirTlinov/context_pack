@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     app::{
-        ports::{CodeExcerptPort, ListFilter, PackRepositoryPort},
+        ports::{CodeExcerptPort, FreshnessState, ListFilter, PackRepositoryPort},
         resolver::resolve_pack,
     },
     domain::{
@@ -118,9 +118,22 @@ impl InputUseCases {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<Vec<Pack>> {
+        self.list_with_freshness(status, query, limit, offset, None)
+            .await
+    }
+
+    pub async fn list_with_freshness(
+        &self,
+        status: Option<Status>,
+        query: Option<String>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        freshness: Option<FreshnessState>,
+    ) -> Result<Vec<Pack>> {
         self.repo
             .list_packs(ListFilter {
                 status,
+                freshness,
                 query,
                 limit,
                 offset,

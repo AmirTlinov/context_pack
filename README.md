@@ -181,7 +181,17 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 - `create` requires `ttl_minutes`.
 - `touch_ttl` accepts exactly one: `ttl_minutes` or `extend_minutes`.
 - `output` actions stay `list|get` (no extra tool/action sprawl).
+- `input list` and `output list` accept optional `freshness` filter:
+  - `fresh`
+  - `expiring_soon`
+  - `expired`
+- Default list behavior is stale-safe: expired packs are hidden unless `freshness=expired` is requested explicitly.
 - `output get` additive args: `mode(full|compact)`, `limit`, `offset`, `cursor`, `match` (regex).
+- Freshness metadata is normalized and stable in list/get surfaces:
+  - `freshness_state`
+  - `expires_at`
+  - `ttl_remaining`
+- Human-readable output (`output list|get`) adds concise warnings for `expiring_soon` and `expired`.
 - Deterministic `output get(name=...)` resolution order:
   1. prefer `finalized` candidates over non-finalized;
   2. inside that status tier, pick latest `updated_at`;
@@ -269,10 +279,23 @@ Name-based read (deterministic/fail-closed):
 }
 ```
 
+List only expired packs (explicit stale surfacing):
+
+```json
+{
+  "name": "output",
+  "arguments": {
+    "action": "list",
+    "freshness": "expired"
+  }
+}
+```
+
 In successful output LEGEND, inspect:
 - `selected_by` (`exact_id` or name-based policy marker)
 - `selected_revision`
 - `selected_status`
+- `freshness_state` / `expires_at` / `ttl_remaining` (+ `warning` when stale risk is present)
 
 </details>
 
@@ -446,7 +469,17 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 - `create` требует `ttl_minutes`.
 - `touch_ttl` принимает строго одно: `ttl_minutes` или `extend_minutes`.
 - `output` остаётся с actions только `list|get` (без разрастания API).
+- `input list` и `output list` принимают опциональный фильтр `freshness`:
+  - `fresh`
+  - `expiring_soon`
+  - `expired`
+- Поведение list по умолчанию stale-safe: expired-пакеты скрыты, пока явно не запрошен `freshness=expired`.
 - Дополнительные аргументы `output get`: `mode(full|compact)`, `limit`, `offset`, `cursor`, `match` (regex).
+- В list/get добавлена нормализованная freshness-мета в стабильной форме:
+  - `freshness_state`
+  - `expires_at`
+  - `ttl_remaining`
+- В человекочитаемом выводе (`output list|get`) добавляются краткие предупреждения для `expiring_soon` и `expired`.
 - Детерминированное разрешение `output get(name=...)`:
   1. приоритет `finalized` над не-finalized;
   2. внутри выбранного статуса — максимальный `updated_at`;
@@ -508,9 +541,22 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 }
 ```
 
+Показать только expired-пакеты (явное surfacing stale):
+
+```json
+{
+  "name": "output",
+  "arguments": {
+    "action": "list",
+    "freshness": "expired"
+  }
+}
+```
+
 В успешном LEGEND проверяйте:
 - `selected_by` (`exact_id` или маркер name-политики)
 - `selected_revision`
 - `selected_status`
+- `freshness_state` / `expires_at` / `ttl_remaining` (+ `warning`, когда есть риск stale)
 
 </details>

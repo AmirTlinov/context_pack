@@ -2,11 +2,12 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 use crate::app::output_usecases::{OutputGetRequest, OutputMode, OutputUseCases};
+use crate::app::ports::FreshnessState;
 use crate::domain::errors::DomainError;
 use crate::domain::models::Pack;
 use crate::domain::types::PackId;
 
-use super::{req_identifier, status_opt, str_opt, tool_text_success, usize_opt};
+use super::{freshness_opt, req_identifier, status_opt, str_opt, tool_text_success, usize_opt};
 
 pub(super) async fn handle_output_tool(
     args: &Value,
@@ -27,10 +28,13 @@ pub(super) async fn handle_output_tool(
     match action {
         "list" => {
             let status = status_opt(args, "status")?;
+            let freshness = freshness_opt(args, "freshness")?;
             let query = str_opt(args, "query");
             let limit = usize_opt(args, "limit")?;
             let offset = usize_opt(args, "offset")?;
-            let packs = uc.list_filtered(status, query, limit, offset).await?;
+            let packs = uc
+                .list_filtered_with_freshness(status, query, limit, offset, freshness)
+                .await?;
             tool_text_success(format_pack_list_markdown(&packs))
         }
         "get" => {
@@ -77,10 +81,15 @@ fn format_pack_list_markdown(packs: &[Pack]) -> String {
             .or(pack.name.as_ref().map(|n| n.as_str()))
             .unwrap_or("Untitled");
         let ttl = pack.ttl_remaining_human(now);
+        let freshness = FreshnessState::from_pack(pack, now);
         out.push_str(&format!(
-            "- `{}` — {} (revision `{}`, ttl `{}`)\n",
-            pack.id, title, pack.revision, ttl
+            "- `{}` — {} (revision `{}`, ttl `{}`, freshness `{}`)",
+            pack.id, title, pack.revision, ttl, freshness
         ));
+        if let Some(warning) = freshness.warning_text() {
+            out.push_str(&format!(" [warning: {}]", warning));
+        }
+        out.push('\n');
     }
     out
 }
