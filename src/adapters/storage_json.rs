@@ -9,7 +9,9 @@ use tokio::task;
 use crate::{
     app::ports::{FreshnessState, ListFilter, PackRepositoryPort},
     domain::{
-        errors::{DomainError, Result},
+        errors::{
+            revision_conflict_guidance, DomainError, Result, REVISION_CONFLICT_CHANGED_KEYS_LIMIT,
+        },
         models::Pack,
         types::{PackId, PackName, Status},
     },
@@ -30,6 +32,35 @@ fn parse_max_pack_bytes_from_env() -> usize {
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_MAX_PACK_BYTES)
+}
+
+fn conflict_changed_section_keys(current: &Pack, attempted: &Pack) -> Vec<String> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn map_sections(pack: &Pack) -> BTreeMap<String, String> {
+        pack.sections
+            .iter()
+            .map(|section| {
+                let fingerprint = serde_json::to_string(section).unwrap_or_else(|_| String::new());
+                (section.key.as_str().to_string(), fingerprint)
+            })
+            .collect()
+    }
+
+    let current_map = map_sections(current);
+    let attempted_map = map_sections(attempted);
+
+    let mut changed = BTreeSet::new();
+    for key in current_map.keys().chain(attempted_map.keys()) {
+        if current_map.get(key) != attempted_map.get(key) {
+            changed.insert(key.clone());
+        }
+    }
+
+    changed
+        .into_iter()
+        .take(REVISION_CONFLICT_CHANGED_KEYS_LIMIT)
+        .collect()
 }
 
 pub struct JsonStorageAdapter {
@@ -530,9 +561,12 @@ impl PackRepositoryPort for JsonStorageAdapter {
                 if let Err(e) = lock.unlock() {
                     tracing::warn!("failed to unlock repo lock: {e}");
                 }
-                return Err(DomainError::RevisionConflict {
-                    expected: expected_revision,
-                    actual: current.revision,
+                return Err(DomainError::RevisionConflictDetailed {
+                    expected_revision,
+                    current_revision: current.revision,
+                    last_updated_at: current.updated_at.to_rfc3339(),
+                    changed_section_keys: conflict_changed_section_keys(&current, &pack),
+                    guidance: revision_conflict_guidance(current.revision),
                 });
             }
 

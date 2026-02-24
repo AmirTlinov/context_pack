@@ -259,6 +259,16 @@ scripts/check_coverage_baseline.sh
 ## Troubleshooting
 
 - `revision_conflict` → re-read pack (`get`) and retry with fresh `expected_revision`.
+- `revision_conflict` now includes actionable diagnostics in `details`:
+  - `expected_revision`
+  - `current_revision` (compat alias: `actual_revision`)
+  - `last_updated_at`
+  - `changed_section_keys` (bounded list)
+  - `guidance` (operator next steps)
+- conflict-handling playbook:
+  1. re-read latest pack (`input get`) to fetch current revision and state;
+  2. merge your pending intent against latest sections listed in `changed_section_keys`;
+  3. retry mutation with `expected_revision=current_revision` from reread.
 - `stale_ref` → update or delete outdated anchor.
 - `not_found` → pack likely expired by TTL.
 - `tool output too large` → split pack into smaller sections (rendered output is bounded).
@@ -552,6 +562,16 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 ## Диагностика
 
 - `revision_conflict` → перечитать пакет (`get`) и повторить мутацию с новым `expected_revision`.
+- `revision_conflict` теперь возвращает диагностику в `details`:
+  - `expected_revision`
+  - `current_revision` (совместимый алиас: `actual_revision`)
+  - `last_updated_at`
+  - `changed_section_keys` (ограниченный список)
+  - `guidance` (подсказка оператору по следующим шагам)
+- playbook при конфликте:
+  1. перечитать актуальный пакет (`input get`), получить свежий `revision` и состояние;
+  2. сверить/слить своё намерение с секциями из `changed_section_keys`;
+  3. повторить мутацию с `expected_revision=current_revision` из перечитанного пакета.
 - `stale_ref` → обновить или удалить устаревший якорь.
 - `not_found` → пакет, скорее всего, истёк по TTL.
 - `tool output too large` → разбить пакет на более мелкие секции.
