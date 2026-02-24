@@ -41,28 +41,44 @@ pub(super) async fn handle_input_tool(
             )
         }
         "get" => {
-            let ident = req_identifier(args)?;
+            let ident = req_pack_identifier(args, "input", "get")?;
             let pack = uc.get(&ident).await?;
             tool_success("get", pack_with_freshness_metadata(pack)?)
         }
         "write" => handle_write_action(args, uc).await,
         "ttl" => {
-            let ident = req_identifier(args)?;
-            let expected_revision = req_u64(args, "expected_revision")?;
+            let ident = req_pack_identifier(args, "input", "ttl")?;
+            let expected_revision = req_expected_revision(args)?;
             let ttl_minutes = u64_opt(args, "ttl_minutes")?;
             let extend_minutes = u64_opt(args, "extend_minutes")?;
             let mode = match (ttl_minutes, extend_minutes) {
                 (Some(_), Some(_)) => {
-                    return Err(DomainError::InvalidData(
-                        "provide either 'ttl_minutes' or 'extend_minutes', not both".into(),
-                    ));
+                    return Err(DomainError::DetailedInvalidData {
+                        message:
+                            "input ttl requires exactly one of 'ttl_minutes' or 'extend_minutes'"
+                                .into(),
+                        details: json!({
+                            "action": "ttl",
+                            "required_fields": ["ttl_minutes", "extend_minutes"],
+                            "required_mode": "exactly_one_of",
+                            "provided_fields": [
+                                "ttl_minutes",
+                                "extend_minutes"
+                            ],
+                        }),
+                    });
                 }
                 (Some(minutes), None) => TouchTtlMode::SetMinutes(minutes),
                 (None, Some(minutes)) => TouchTtlMode::ExtendMinutes(minutes),
                 (None, None) => {
-                    return Err(DomainError::TtlRequired(
-                        "'ttl_minutes' or 'extend_minutes' is required".into(),
-                    ));
+                    return Err(DomainError::DetailedInvalidData {
+                        message: "input ttl requires 'ttl_minutes' or 'extend_minutes'".into(),
+                        details: json!({
+                            "action": "ttl",
+                            "required_fields": ["ttl_minutes", "extend_minutes"],
+                            "required_mode": "exactly_one_of",
+                        }),
+                    });
                 }
             };
             let pack = uc
@@ -71,7 +87,7 @@ pub(super) async fn handle_input_tool(
             tool_success("ttl", serde_json::to_value(pack)?)
         }
         "delete" => {
-            let id = req_str(args, "id")?;
+            let id = req_pack_identifier(args, "input", "delete")?;
             let deleted = uc.delete_pack_file(&id).await?;
             tool_success(
                 "delete",
@@ -86,24 +102,24 @@ pub(super) async fn handle_input_tool(
 }
 
 async fn handle_write_action(args: &Value, uc: &InputUseCases) -> Result<Value, DomainError> {
-    let op = req_str(args, "op")?;
+    let op = req_write_action(args)?;
     match op.as_str() {
         "create" => {
             let name = str_opt(args, "name");
             let title = str_opt(args, "title");
             let brief = str_opt(args, "brief");
             let tags = tags_opt(args)?;
-            let ttl_minutes = req_u64(args, "ttl_minutes")?;
+            let ttl_minutes = req_u64_required(args, "ttl_minutes", "input/write")?;
             let pack = uc
                 .create_with_tags_ttl(name, title, brief, tags, ttl_minutes)
                 .await?;
             tool_success("write", serde_json::to_value(pack)?)
         }
         "upsert_section" => {
-            reject_legacy_alias(args, "title", "section_title")?;
-            reject_legacy_alias(args, "description", "section_description")?;
-            let ident = req_identifier(args)?;
-            let expected_revision = req_u64(args, "expected_revision")?;
+            reject_legacy_alias(args, "write upsert_section", "title", "section_title")?;
+            reject_legacy_alias(args, "write upsert_section", "description", "section_description")?;
+            let ident = req_pack_identifier(args, "input/write", "upsert_section")?;
+            let expected_revision = req_expected_revision(args)?;
             let section_key = req_str(args, "section_key")?;
             let title = req_str(args, "section_title")?;
             let description = str_opt(args, "section_description");
@@ -121,8 +137,8 @@ async fn handle_write_action(args: &Value, uc: &InputUseCases) -> Result<Value, 
             tool_success("write", serde_json::to_value(pack)?)
         }
         "delete_section" => {
-            let ident = req_identifier(args)?;
-            let expected_revision = req_u64(args, "expected_revision")?;
+            let ident = req_pack_identifier(args, "input/write", "delete_section")?;
+            let expected_revision = req_expected_revision(args)?;
             let section_key = req_str(args, "section_key")?;
             let pack = uc
                 .delete_section_checked(&ident, &section_key, expected_revision)
@@ -130,10 +146,10 @@ async fn handle_write_action(args: &Value, uc: &InputUseCases) -> Result<Value, 
             tool_success("write", serde_json::to_value(pack)?)
         }
         "upsert_ref" => {
-            reject_legacy_alias(args, "title", "ref_title")?;
-            reject_legacy_alias(args, "why", "ref_why")?;
-            let ident = req_identifier(args)?;
-            let expected_revision = req_u64(args, "expected_revision")?;
+            reject_legacy_alias(args, "write upsert_ref", "title", "ref_title")?;
+            reject_legacy_alias(args, "write upsert_ref", "why", "ref_why")?;
+            let ident = req_pack_identifier(args, "input/write", "upsert_ref")?;
+            let expected_revision = req_expected_revision(args)?;
             let req = UpsertRefRequest {
                 section_key: req_str(args, "section_key")?,
                 ref_key: req_str(args, "ref_key")?,
@@ -150,8 +166,8 @@ async fn handle_write_action(args: &Value, uc: &InputUseCases) -> Result<Value, 
             tool_success("write", serde_json::to_value(pack)?)
         }
         "delete_ref" => {
-            let ident = req_identifier(args)?;
-            let expected_revision = req_u64(args, "expected_revision")?;
+            let ident = req_pack_identifier(args, "input/write", "delete_ref")?;
+            let expected_revision = req_expected_revision(args)?;
             let section_key = req_str(args, "section_key")?;
             let ref_key = req_str(args, "ref_key")?;
             let pack = uc
@@ -160,9 +176,9 @@ async fn handle_write_action(args: &Value, uc: &InputUseCases) -> Result<Value, 
             tool_success("write", serde_json::to_value(pack)?)
         }
         "upsert_diagram" => {
-            reject_legacy_alias(args, "why", "diagram_why")?;
-            let ident = req_identifier(args)?;
-            let expected_revision = req_u64(args, "expected_revision")?;
+            reject_legacy_alias(args, "write upsert_diagram", "why", "diagram_why")?;
+            let ident = req_pack_identifier(args, "input/write", "upsert_diagram")?;
+            let expected_revision = req_expected_revision(args)?;
             let request = UpsertDiagramRequest {
                 section_key: req_str(args, "section_key")?,
                 diagram_key: req_str(args, "diagram_key")?,
@@ -176,8 +192,8 @@ async fn handle_write_action(args: &Value, uc: &InputUseCases) -> Result<Value, 
             tool_success("write", serde_json::to_value(pack)?)
         }
         "set_meta" => {
-            let ident = req_identifier(args)?;
-            let expected_revision = req_u64(args, "expected_revision")?;
+            let ident = req_pack_identifier(args, "input/write", "set_meta")?;
+            let expected_revision = req_expected_revision(args)?;
             let title = str_opt(args, "title");
             let brief = str_opt(args, "brief");
             let tags = tags_opt(args)?;
@@ -187,42 +203,159 @@ async fn handle_write_action(args: &Value, uc: &InputUseCases) -> Result<Value, 
             tool_success("write", serde_json::to_value(pack)?)
         }
         "set_status" => {
-            let ident = req_identifier(args)?;
-            let expected_revision = req_u64(args, "expected_revision")?;
+            let ident = req_pack_identifier(args, "input/write", "set_status")?;
+            let expected_revision = req_expected_revision(args)?;
             let status = req_status(args, "status")?;
             let pack = uc
                 .set_status_checked(&ident, status, expected_revision)
                 .await?;
             tool_success("write", serde_json::to_value(pack)?)
         }
-        _ => Err(DomainError::InvalidData(format!(
-            "unknown write op '{}'; allowed ops: create, upsert_section, delete_section, upsert_ref, delete_ref, upsert_diagram, set_meta, set_status",
-            op
-        ))),
+        _ => Err(DomainError::DetailedInvalidData {
+            message: format!(
+                "unknown write op '{}'; allowed ops: create, upsert_section, delete_section, upsert_ref, delete_ref, upsert_diagram, set_meta, set_status",
+                op
+            ),
+            details: json!({
+                "action": "write",
+                "requested_op": op,
+                "allowed_ops": [
+                    "create",
+                    "upsert_section",
+                    "delete_section",
+                    "upsert_ref",
+                    "delete_ref",
+                    "upsert_diagram",
+                    "set_meta",
+                    "set_status"
+                ],
+            }),
+        }),
     }
 }
 
-fn unsupported_input_action(action: &str) -> DomainError {
-    let hint = match action {
-        "create" | "upsert_section" | "delete_section" | "upsert_ref" | "delete_ref"
-        | "upsert_diagram" | "set_meta" | "set_status" => {
-            Some(format!("use action='write' with op='{}'", action))
-        }
-        "touch_ttl" => Some("use action='ttl'".to_string()),
-        "delete_pack" => Some("use action='delete'".to_string()),
-        _ => None,
-    };
+fn req_pack_identifier(args: &Value, tool: &str, action: &str) -> Result<String, DomainError> {
+    req_identifier(args).map_err(|err| match err {
+        DomainError::InvalidData(_) => DomainError::DetailedInvalidData {
+            message: format!("{} {} requires 'id' or 'name'", tool, action),
+            details: json!({
+                "tool": tool,
+                "action": action,
+                "required_fields": ["id", "name"],
+                "mutually_interchangeable": ["id", "name"]
+            }),
+        },
+        other => other,
+    })
+}
 
-    if let Some(hint) = hint {
-        DomainError::InvalidData(format!(
-            "input action '{}' is not supported in v3; {}",
-            action, hint
-        ))
-    } else {
-        DomainError::InvalidData(format!(
-            "unknown input action '{}'; allowed actions: list, get, write, ttl, delete",
-            action
-        ))
+fn req_expected_revision(args: &Value) -> Result<u64, DomainError> {
+    req_u64(args, "expected_revision").map_err(|err| match err {
+        DomainError::InvalidData(_) => DomainError::DetailedInvalidData {
+            message: "write/ttl actions require expected_revision".into(),
+            details: json!({
+                "tool": "input",
+                "action": "revision_guard",
+                "required_fields": ["expected_revision"],
+                "guidance": [
+                    "fetch latest revision with input.get before mutating"
+                ]
+            }),
+        },
+        other => other,
+    })
+}
+
+fn req_u64_required(args: &Value, key: &str, tool_action: &str) -> Result<u64, DomainError> {
+    req_u64(args, key).map_err(|err| match err {
+        DomainError::InvalidData(_) => DomainError::DetailedInvalidData {
+            message: format!("{} requires '{}'", tool_action, key),
+            details: json!({
+                "tool": "input",
+                "action": "write",
+                "required_fields": [key],
+            }),
+        },
+        other => other,
+    })
+}
+
+fn req_write_action(args: &Value) -> Result<String, DomainError> {
+    req_str(args, "op").map_err(|err| match err {
+        DomainError::InvalidData(_) => DomainError::DetailedInvalidData {
+            message: "write action requires 'op'".into(),
+            details: json!({
+                "tool": "input",
+                "action": "write",
+                "required_fields": ["op"],
+                "allowed_ops": [
+                    "create",
+                    "upsert_section",
+                    "delete_section",
+                    "upsert_ref",
+                    "delete_ref",
+                    "upsert_diagram",
+                    "set_meta",
+                    "set_status"
+                ]
+            }),
+        },
+        other => other,
+    })
+}
+
+fn unsupported_input_action(action: &str) -> DomainError {
+    match action {
+        "create" | "upsert_section" | "delete_section" | "upsert_ref" | "delete_ref"
+        | "upsert_diagram" | "set_meta" | "set_status" => DomainError::DetailedInvalidData {
+            message: format!(
+                "input action '{}' is not supported in v3; use action='write' with op='{}'",
+                action, action
+            ),
+            details: json!({
+                "tool": "input",
+                "action": "unsupported",
+                "requested_action": action,
+                "allowed_actions": ["list", "get", "write", "ttl", "delete"],
+                "legacy_mapping": {
+                    "action": "write",
+                    "op": action,
+                },
+            }),
+        },
+        "touch_ttl" => DomainError::DetailedInvalidData {
+            message: "input action 'touch_ttl' is not supported in v3; use action='ttl'".into(),
+            details: json!({
+                "tool": "input",
+                "action": "unsupported",
+                "requested_action": "touch_ttl",
+                "allowed_actions": ["list", "get", "write", "ttl", "delete"],
+                "legacy_mapping": { "action": "ttl" },
+            }),
+        },
+        "delete_pack" => DomainError::DetailedInvalidData {
+            message: "input action 'delete_pack' is not supported in v3; use action='delete'"
+                .into(),
+            details: json!({
+                "tool": "input",
+                "action": "unsupported",
+                "requested_action": "delete_pack",
+                "allowed_actions": ["list", "get", "write", "ttl", "delete"],
+                "legacy_mapping": { "action": "delete" },
+            }),
+        },
+        _ => DomainError::DetailedInvalidData {
+            message: format!(
+                "unknown input action '{}'; allowed actions: list, get, write, ttl, delete",
+                action
+            ),
+            details: json!({
+                "tool": "input",
+                "action": "unknown",
+                "requested_action": action,
+                "allowed_actions": ["list", "get", "write", "ttl", "delete"],
+            }),
+        },
     }
 }
 
@@ -257,14 +390,23 @@ fn pack_with_freshness_metadata(pack: Pack) -> Result<Value, DomainError> {
 
 fn reject_legacy_alias(
     args: &Value,
+    action_context: &str,
     legacy_key: &str,
     canonical_key: &str,
 ) -> Result<(), DomainError> {
     if args.get(legacy_key).is_some() {
-        return Err(DomainError::InvalidData(format!(
-            "'{}' is not supported; use '{}' instead",
-            legacy_key, canonical_key
-        )));
+        return Err(DomainError::DetailedInvalidData {
+            message: format!(
+                "'{}' is not supported for {} in v3; use '{}' instead",
+                legacy_key, action_context, canonical_key
+            ),
+            details: json!({
+                "tool": "input",
+                "action_context": action_context,
+                "unsupported_field": legacy_key,
+                "supported_field": canonical_key,
+            }),
+        });
     }
     Ok(())
 }

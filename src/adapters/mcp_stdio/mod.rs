@@ -573,6 +573,28 @@ mod tests {
     }
 
     #[test]
+    fn test_domain_error_contract_for_detailed_invalid_data() {
+        let envelope = domain_error_response(
+            Value::from("detailed"),
+            &DomainError::DetailedInvalidData {
+                message: "bad request".into(),
+                details: json!({
+                    "required_fields": ["id"],
+                    "code_hint": "missing_id"
+                }),
+            },
+        );
+        let text = extract_content_text(&envelope);
+        let parsed: Value = serde_json::from_str(&text).expect("must be valid JSON");
+        assert_eq!(parsed["error"], true);
+        assert_eq!(parsed["kind"], "validation");
+        assert_eq!(parsed["code"], "invalid_data");
+        assert_eq!(parsed["message"], "bad request");
+        assert_eq!(parsed["details"]["required_fields"], json!(["id"]));
+        assert_eq!(parsed["details"]["code_hint"], "missing_id");
+    }
+
+    #[test]
     fn test_domain_error_contract_keeps_string_request_id() {
         let envelope = domain_error_response(
             Value::from("req-42"),
@@ -629,7 +651,7 @@ mod tests {
         let args = json!({ "format": "json" });
         let err =
             crate::adapters::mcp_stdio::tool_output::reject_output_format_param(&args).unwrap_err();
-        assert!(matches!(err, DomainError::InvalidData(_)));
+        assert!(matches!(err, DomainError::DetailedInvalidData { .. }));
     }
 
     #[test]

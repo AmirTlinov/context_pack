@@ -558,13 +558,30 @@ async fn e2e_input_delete_pack_is_deterministic() -> Result<()> {
             .context("missing created pack id")?
             .to_string();
 
+        let missing_delete = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":3,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"delete"
+                    }
+                }
+            }))
+            .await?;
+        assert_eq!(missing_delete["result"]["isError"], true);
+        let missing_delete_payload = parse_tool_payload(&missing_delete)?;
+        assert_eq!(missing_delete_payload["details"]["required_fields"], json!(["id", "name"]));
+
         let pack_path = storage_root.join("packs").join(format!("{}.json", pack_id));
         assert!(pack_path.exists(), "new pack file must exist before delete_pack");
 
         let deleted = client
             .call(json!({
                 "jsonrpc":"2.0",
-                "id":3,
+                "id":4,
                 "method":"tools/call",
                 "params":{
                     "name":"input",
@@ -582,7 +599,7 @@ async fn e2e_input_delete_pack_is_deterministic() -> Result<()> {
         let list = client
             .call(json!({
                 "jsonrpc":"2.0",
-                "id":4,
+                "id":5,
                 "method":"tools/call",
                 "params":{
                     "name":"input",
@@ -596,7 +613,7 @@ async fn e2e_input_delete_pack_is_deterministic() -> Result<()> {
         let deleted_again = client
             .call(json!({
                 "jsonrpc":"2.0",
-                "id":5,
+                "id":6,
                 "method":"tools/call",
                 "params":{
                     "name":"input",
@@ -659,6 +676,11 @@ async fn e2e_tool_error_contract_is_machine_readable() -> Result<()> {
             .as_str()
             .unwrap_or_default()
             .contains("unknown input action"));
+        assert_eq!(err_payload["details"]["requested_action"], "boom");
+        assert_eq!(
+            err_payload["details"]["allowed_actions"],
+            json!(["list", "get", "write", "ttl", "delete"])
+        );
         Ok(())
     }
     .await;
@@ -714,6 +736,14 @@ async fn e2e_v3_rejects_legacy_actions_with_invalid_data() -> Result<()> {
                 .contains("action='write'"),
             "legacy input action error must include v3 guidance"
         );
+        assert_eq!(
+            legacy_input_payload["details"]["legacy_mapping"]["action"],
+            "write"
+        );
+        assert_eq!(
+            legacy_input_payload["details"]["legacy_mapping"]["op"],
+            "create"
+        );
 
         let legacy_output = client
             .call(json!({
@@ -739,7 +769,76 @@ async fn e2e_v3_rejects_legacy_actions_with_invalid_data() -> Result<()> {
                 .contains("use action='read'"),
             "legacy output action must return explicit invalid_data guidance"
         );
+        assert_eq!(legacy_output_payload["details"]["requested_action"], "get");
 
+        Ok(())
+    }
+    .await;
+
+    client.stop().await?;
+    result
+}
+
+#[tokio::test]
+async fn e2e_input_rejects_missing_write_expected_revision_with_details() -> Result<()> {
+    let dir = tempdir()?;
+    let storage_root = dir.path().join("storage");
+    let source_root = dir.path().join("source");
+    tokio::fs::create_dir_all(&storage_root).await?;
+    tokio::fs::create_dir_all(&source_root).await?;
+
+    let mut client = McpE2EClient::spawn(&storage_root, &source_root).await?;
+
+    let result: Result<()> = async {
+        let _ = client
+            .call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .await?;
+
+        let created = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"write","op":"create",
+                        "name":"missing-revision-pack",
+                        "ttl_minutes": 30
+                    }
+                }
+            }))
+            .await?;
+        let created_payload = parse_tool_payload(&created)?;
+        let pack_id = created_payload["payload"]["id"]
+            .as_str()
+            .context("missing created pack id")?
+            .to_string();
+
+        let response = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":3,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"write","op":"set_status",
+                        "id":pack_id,
+                        "status":"draft"
+                    }
+                }
+            }))
+            .await?;
+
+        assert_eq!(response["result"]["isError"], true);
+        let err_payload = parse_tool_payload(&response)?;
+        assert_eq!(err_payload["kind"], "validation");
+        assert_eq!(err_payload["code"], "invalid_data");
+        assert_eq!(
+            err_payload["details"]["required_fields"],
+            json!(["expected_revision"])
+        );
         Ok(())
     }
     .await;
@@ -1157,7 +1256,11 @@ async fn e2e_touch_ttl_requires_mode_field() -> Result<()> {
         assert_eq!(response["result"]["isError"], true);
         let err_payload = parse_tool_payload(&response)?;
         assert_eq!(err_payload["kind"], "validation");
-        assert_eq!(err_payload["code"], "ttl_required");
+        assert_eq!(err_payload["code"], "invalid_data");
+        assert_eq!(
+            err_payload["details"]["required_fields"],
+            json!(["ttl_minutes", "extend_minutes"])
+        );
         Ok(())
     }
     .await;
@@ -1200,10 +1303,10 @@ async fn e2e_create_requires_ttl_minutes() -> Result<()> {
         let err_payload = parse_tool_payload(&response)?;
         assert_eq!(err_payload["kind"], "validation");
         assert_eq!(err_payload["code"], "invalid_data");
-        assert!(err_payload["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("'ttl_minutes' is required"));
+        assert_eq!(
+            err_payload["details"]["required_fields"],
+            json!(["ttl_minutes"])
+        );
         Ok(())
     }
     .await;
@@ -1733,6 +1836,8 @@ async fn e2e_output_read_rejects_legacy_match_cursor_mode_fields() -> Result<()>
             .as_str()
             .unwrap_or_default()
             .contains("'match' is not supported"));
+        assert_eq!(err_payload["details"]["unsupported_field"], "match");
+        assert_eq!(err_payload["details"]["supported_field"], "contains");
 
         let cursor_response = client
             .call(json!({
@@ -1755,6 +1860,8 @@ async fn e2e_output_read_rejects_legacy_match_cursor_mode_fields() -> Result<()>
             .as_str()
             .unwrap_or_default()
             .contains("'cursor' is not supported"));
+        assert_eq!(cursor_payload["details"]["unsupported_field"], "cursor");
+        assert_eq!(cursor_payload["details"]["supported_field"], "page_token");
 
         let mode_response = client
             .call(json!({
@@ -1777,6 +1884,52 @@ async fn e2e_output_read_rejects_legacy_match_cursor_mode_fields() -> Result<()>
             .as_str()
             .unwrap_or_default()
             .contains("'mode' is not supported"));
+        assert_eq!(mode_payload["details"]["unsupported_field"], "mode");
+        Ok(())
+    }
+    .await;
+
+    client.stop().await?;
+    result
+}
+
+#[tokio::test]
+async fn e2e_output_read_requires_id_or_name() -> Result<()> {
+    let dir = tempdir()?;
+    let storage_root = dir.path().join("storage");
+    let source_root = dir.path().join("source");
+    tokio::fs::create_dir_all(&storage_root).await?;
+    tokio::fs::create_dir_all(&source_root).await?;
+
+    let mut client = McpE2EClient::spawn(&storage_root, &source_root).await?;
+
+    let result: Result<()> = async {
+        let _ = client
+            .call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .await?;
+
+        let response = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"tools/call",
+                "params":{
+                    "name":"output",
+                    "arguments":{
+                        "action":"read"
+                    }
+                }
+            }))
+            .await?;
+
+        assert_eq!(response["result"]["isError"], true);
+        let err_payload = parse_tool_payload(&response)?;
+        assert_eq!(err_payload["kind"], "validation");
+        assert_eq!(err_payload["code"], "invalid_data");
+        assert_eq!(
+            err_payload["details"]["required_fields"],
+            json!(["id", "name"])
+        );
         Ok(())
     }
     .await;
@@ -1844,6 +1997,8 @@ async fn e2e_output_rejects_format_parameter() -> Result<()> {
             .as_str()
             .unwrap_or_default()
             .contains("always markdown"));
+        assert_eq!(err_payload["details"]["field"], "format");
+        assert_eq!(err_payload["details"]["required_mode"], "markdown");
         Ok(())
     }
     .await;
