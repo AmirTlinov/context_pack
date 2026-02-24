@@ -317,7 +317,7 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
             .to_string();
         let mut revision = payload_pack_revision(&created_payload)?;
 
-        let upsert_section = client
+        let upsert_scope = client
             .call(json!({
                 "jsonrpc":"2.0",
                 "id":4,
@@ -328,16 +328,16 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
                         "id": pack_id.clone(),
                         "action":"upsert_section",
                         "expected_revision": revision,
-                        "section_key":"flow",
-                        "section_title":"Flow section",
-                        "section_description":"Auth flow anchor"
+                        "section_key":"scope",
+                        "section_title":"Scope",
+                        "section_description":"Auth flow scope"
                     }
                 }
             }))
             .await?;
-        revision = payload_pack_revision(&parse_tool_payload(&upsert_section)?)?;
+        revision = payload_pack_revision(&parse_tool_payload(&upsert_scope)?)?;
 
-        let upsert_ref = client
+        let upsert_findings = client
             .call(json!({
                 "jsonrpc":"2.0",
                 "id":5,
@@ -346,9 +346,29 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
                     "name":"input",
                     "arguments":{
                         "id": pack_id.clone(),
+                        "action":"upsert_section",
+                        "expected_revision": revision,
+                        "section_key":"findings",
+                        "section_title":"Findings",
+                        "section_description":"Auth findings"
+                    }
+                }
+            }))
+            .await?;
+        revision = payload_pack_revision(&parse_tool_payload(&upsert_findings)?)?;
+
+        let upsert_ref = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":6,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "id": pack_id.clone(),
                         "action":"upsert_ref",
                         "expected_revision": revision,
-                        "section_key":"flow",
+                        "section_key":"findings",
                         "ref_key":"auth_handler",
                         "ref_title":"login handler",
                         "ref_why":"Need actual snippet for login flow",
@@ -361,10 +381,30 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
             .await?;
         revision = payload_pack_revision(&parse_tool_payload(&upsert_ref)?)?;
 
+        let upsert_qa = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":7,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "id": pack_id.clone(),
+                        "action":"upsert_section",
+                        "expected_revision": revision,
+                        "section_key":"qa",
+                        "section_title":"QA",
+                        "section_description":"verdict: pass"
+                    }
+                }
+            }))
+            .await?;
+        revision = payload_pack_revision(&parse_tool_payload(&upsert_qa)?)?;
+
         let finalized = client
             .call(json!({
                 "jsonrpc":"2.0",
-                "id":6,
+                "id":8,
                 "method":"tools/call",
                 "params":{
                     "name":"input",
@@ -378,12 +418,12 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
             }))
             .await?;
         revision = payload_pack_revision(&parse_tool_payload(&finalized)?)?;
-        assert!(revision >= 4);
+        assert!(revision >= 6);
 
         let output = client
             .call(json!({
                 "jsonrpc":"2.0",
-                "id":7,
+                "id":9,
                 "method":"tools/call",
                 "params":{
                     "name":"output",
@@ -412,7 +452,7 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
         let output_full = client
             .call(json!({
                 "jsonrpc":"2.0",
-                "id":8,
+                "id":10,
                 "method":"tools/call",
                 "params":{
                     "name":"output",
@@ -435,7 +475,7 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
         let listed = client
             .call(json!({
                 "jsonrpc":"2.0",
-                "id":9,
+                "id":11,
                 "method":"tools/call",
                 "params":{
                     "name":"output",
@@ -695,6 +735,193 @@ async fn e2e_request_id_and_revision_conflict_contract() -> Result<()> {
                 .as_u64()
                 .unwrap_or(0)
                 > stale_revision
+        );
+        Ok(())
+    }
+    .await;
+
+    client.stop().await?;
+    result
+}
+
+#[tokio::test]
+async fn e2e_finalize_validation_reports_missing_sections_and_invalid_refs() -> Result<()> {
+    let dir = tempdir()?;
+    let storage_root = dir.path().join("storage");
+    let source_root = dir.path().join("source");
+    tokio::fs::create_dir_all(&storage_root).await?;
+    tokio::fs::create_dir_all(&source_root).await?;
+    tokio::fs::write(source_root.join("short.rs"), "line1\nline2\n").await?;
+
+    let mut client = McpE2EClient::spawn(&storage_root, &source_root).await?;
+
+    let result: Result<()> = async {
+        let _ = client
+            .call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .await?;
+
+        let created = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"create",
+                        "name":"finalize-validation-e2e",
+                        "ttl_minutes": 30
+                    }
+                }
+            }))
+            .await?;
+        let created_payload = parse_tool_payload(&created)?;
+        let pack_id = created_payload["payload"]["id"]
+            .as_str()
+            .context("missing created pack id")?
+            .to_string();
+        let mut revision = payload_pack_revision(&created_payload)?;
+
+        let scope = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":3,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"upsert_section",
+                        "id": pack_id.clone(),
+                        "expected_revision": revision,
+                        "section_key":"scope",
+                        "section_title":"Scope",
+                        "section_description":"scope text"
+                    }
+                }
+            }))
+            .await?;
+        revision = payload_pack_revision(&parse_tool_payload(&scope)?)?;
+
+        let findings = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":4,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"upsert_section",
+                        "id": pack_id.clone(),
+                        "expected_revision": revision,
+                        "section_key":"findings",
+                        "section_title":"Findings",
+                        "section_description":"finding text"
+                    }
+                }
+            }))
+            .await?;
+        revision = payload_pack_revision(&parse_tool_payload(&findings)?)?;
+
+        let stale_ref = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":5,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"upsert_ref",
+                        "id": pack_id.clone(),
+                        "expected_revision": revision,
+                        "section_key":"findings",
+                        "ref_key":"ref-one",
+                        "path":"short.rs",
+                        "line_start": 10,
+                        "line_end": 10
+                    }
+                }
+            }))
+            .await?;
+        revision = payload_pack_revision(&parse_tool_payload(&stale_ref)?)?;
+
+        let missing_qa = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":6,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"set_status",
+                        "id": pack_id.clone(),
+                        "expected_revision": revision,
+                        "status":"finalized"
+                    }
+                }
+            }))
+            .await?;
+        assert_eq!(missing_qa["result"]["isError"], true);
+        let missing_qa_payload = parse_tool_payload(&missing_qa)?;
+        assert_eq!(missing_qa_payload["code"], "finalize_validation");
+        assert_eq!(
+            missing_qa_payload["details"]["missing_sections"],
+            json!(["qa"])
+        );
+        assert_eq!(missing_qa_payload["details"]["missing_fields"], json!([]));
+        assert_eq!(missing_qa_payload["details"]["invalid_refs"], json!([]));
+
+        let qa = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":7,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"upsert_section",
+                        "id": pack_id.clone(),
+                        "expected_revision": revision,
+                        "section_key":"qa",
+                        "section_title":"QA",
+                        "section_description":"verdict: fail"
+                    }
+                }
+            }))
+            .await?;
+        revision = payload_pack_revision(&parse_tool_payload(&qa)?)?;
+
+        let broken_ref = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":8,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"set_status",
+                        "id": pack_id,
+                        "expected_revision": revision,
+                        "status":"finalized"
+                    }
+                }
+            }))
+            .await?;
+        assert_eq!(broken_ref["result"]["isError"], true);
+        let broken_ref_payload = parse_tool_payload(&broken_ref)?;
+        assert_eq!(broken_ref_payload["code"], "finalize_validation");
+        assert_eq!(broken_ref_payload["details"]["missing_sections"], json!([]));
+        assert_eq!(broken_ref_payload["details"]["missing_fields"], json!([]));
+        assert_eq!(
+            broken_ref_payload["details"]["invalid_refs"][0]["section_key"],
+            "findings"
+        );
+        assert_eq!(
+            broken_ref_payload["details"]["invalid_refs"][0]["ref_key"],
+            "ref-one"
+        );
+        assert_eq!(
+            broken_ref_payload["details"]["invalid_refs"][0]["path"],
+            "short.rs"
         );
         Ok(())
     }

@@ -6,7 +6,7 @@ use crate::{
         resolver::resolve_pack,
     },
     domain::{
-        errors::{DomainError, Result},
+        errors::{DomainError, FinalizeRefIssue, Result},
         models::{Pack, RefSpec},
         types::{
             DiagramKey, LineRange, PackId, PackName, RefKey, RelativePath, SectionKey, Status,
@@ -67,7 +67,7 @@ impl InputUseCases {
     }
 
     async fn validate_refs_resolvable_before_finalize(&self, pack: &Pack) -> Result<()> {
-        let mut stale = Vec::new();
+        let mut invalid_refs = Vec::new();
         for section in &pack.sections {
             for code_ref in &section.refs {
                 match self
@@ -77,36 +77,50 @@ impl InputUseCases {
                 {
                     Ok(_) => {}
                     Err(DomainError::StaleRef(msg)) => {
-                        stale.push(format!(
-                            "{}::{} ({}:{}-{}): {}",
-                            section.key,
-                            code_ref.key,
-                            code_ref.path,
-                            code_ref.lines.start,
-                            code_ref.lines.end,
-                            msg
-                        ));
+                        invalid_refs.push(FinalizeRefIssue {
+                            section_key: section.key.as_str().to_string(),
+                            ref_key: code_ref.key.as_str().to_string(),
+                            path: code_ref.path.as_str().to_string(),
+                            line_start: code_ref.lines.start,
+                            line_end: code_ref.lines.end,
+                            reason: msg,
+                        });
                     }
                     Err(err) => return Err(err),
                 }
             }
         }
 
-        if stale.is_empty() {
+        if invalid_refs.is_empty() {
             return Ok(());
         }
 
-        let sample = stale
+        let sample = invalid_refs
             .iter()
             .take(10)
-            .cloned()
+            .map(|issue| {
+                format!(
+                    "{}::{} ({}:{}-{}): {}",
+                    issue.section_key,
+                    issue.ref_key,
+                    issue.path,
+                    issue.line_start,
+                    issue.line_end,
+                    issue.reason
+                )
+            })
             .collect::<Vec<_>>()
             .join("; ");
-        Err(DomainError::InvalidState(format!(
-            "cannot finalize: stale refs detected ({} total): {}",
-            stale.len(),
-            sample
-        )))
+        Err(DomainError::FinalizeValidation {
+            message: format!(
+                "stale/broken refs detected ({} total): {}",
+                invalid_refs.len(),
+                sample
+            ),
+            missing_sections: Vec::new(),
+            missing_fields: Vec::new(),
+            invalid_refs,
+        })
     }
 
     // ── queries ───────────────────────────────────────────────────────────────
@@ -197,6 +211,7 @@ impl InputUseCases {
             .await?;
 
         if status == Status::Finalized {
+            pack.validate_finalize_gate()?;
             self.validate_refs_resolvable_before_finalize(&pack).await?;
         }
 

@@ -91,13 +91,13 @@ async fn test_full_pack_lifecycle() {
     let pack_id = pack.id.as_str().to_string();
     let mut revision = pack.revision;
 
-    // Add section
+    // Add required scope section
     let pack = input_uc
         .upsert_section_checked(
             &pack_id,
-            "sec-one",
-            "Section One".into(),
-            Some("desc".into()),
+            "scope",
+            "Scope".into(),
+            Some("This pack covers auth flow".into()),
             None,
             revision,
         )
@@ -105,12 +105,26 @@ async fn test_full_pack_lifecycle() {
         .unwrap();
     revision = pack.revision;
 
-    // Add ref
+    // Add required findings section
+    let pack = input_uc
+        .upsert_section_checked(
+            &pack_id,
+            "findings",
+            "Findings".into(),
+            Some("Critical findings".into()),
+            None,
+            revision,
+        )
+        .await
+        .unwrap();
+    revision = pack.revision;
+
+    // Add finding ref
     let pack = input_uc
         .upsert_ref_checked(
             &pack_id,
             UpsertRefRequest {
-                section_key: "sec-one".into(),
+                section_key: "findings".into(),
                 ref_key: "ref-one".into(),
                 path: "src/sample.rs".into(),
                 line_start: 2,
@@ -119,6 +133,20 @@ async fn test_full_pack_lifecycle() {
                 why: Some("important context".into()),
                 group: None,
             },
+            revision,
+        )
+        .await
+        .unwrap();
+    revision = pack.revision;
+
+    // Add required QA section with verdict field
+    let pack = input_uc
+        .upsert_section_checked(
+            &pack_id,
+            "qa",
+            "QA".into(),
+            Some("verdict: pass".into()),
+            None,
             revision,
         )
         .await
@@ -137,7 +165,7 @@ async fn test_full_pack_lifecycle() {
     assert!(rendered.contains("[LEGEND]"), "must have LEGEND section");
     assert!(rendered.contains("[CONTENT]"), "must have CONTENT section");
     assert!(rendered.contains("# Context pack: My Test Pack"));
-    assert!(rendered.contains("## Section One"));
+    assert!(rendered.contains("## Findings"));
     assert!(rendered.contains("line2"), "line2 must be in excerpt");
     assert!(rendered.contains("line3"), "line3 must be in excerpt");
     assert!(!rendered.contains("line1"), "line1 must NOT be in excerpt");
@@ -171,7 +199,21 @@ async fn test_finalize_empty_pack_rejected() {
     let res = input_uc
         .set_status_checked(pack.id.as_str(), Status::Finalized, pack.revision)
         .await;
-    assert!(res.is_err(), "cannot finalize empty pack");
+    assert!(
+        matches!(
+            res,
+            Err(DomainError::FinalizeValidation {
+                missing_sections,
+                missing_fields,
+                ..
+            }) if missing_sections == vec![
+                "scope".to_string(),
+                "findings".to_string(),
+                "qa".to_string()
+            ] && missing_fields.is_empty()
+        ),
+        "cannot finalize empty pack: required sections must be reported"
+    );
 }
 
 #[tokio::test]
@@ -192,8 +234,187 @@ async fn test_finalize_pack_with_only_empty_section_rejected() {
         .set_status_checked(&id, Status::Finalized, pack.revision)
         .await;
     assert!(
-        res.is_err(),
-        "cannot finalize pack with empty sections only"
+        matches!(
+            res,
+            Err(DomainError::FinalizeValidation {
+                missing_sections,
+                ..
+            }) if missing_sections == vec![
+                "scope".to_string(),
+                "findings".to_string(),
+                "qa".to_string()
+            ]
+        ),
+        "cannot finalize pack with unrelated sections only"
+    );
+}
+
+#[tokio::test]
+async fn test_finalize_missing_qa_or_verdict_is_actionable() {
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("packs");
+    let source_root = tmp.path().join("src");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::write(source_root.join("sample.rs"), "line1\n").unwrap();
+
+    let (input_uc, _) = build_services(storage_dir, tmp.path().to_path_buf());
+    let pack = input_uc
+        .create_with_tags_ttl(Some("qa-check-pack".into()), None, None, None, 30)
+        .await
+        .unwrap();
+    let id = pack.id.as_str().to_string();
+    let mut revision = pack.revision;
+
+    let pack = input_uc
+        .upsert_section_checked(
+            &id,
+            "scope",
+            "Scope".into(),
+            Some("scope coverage".into()),
+            None,
+            revision,
+        )
+        .await
+        .unwrap();
+    revision = pack.revision;
+
+    let pack = input_uc
+        .upsert_section_checked(
+            &id,
+            "findings",
+            "Findings".into(),
+            Some("finding summary".into()),
+            None,
+            revision,
+        )
+        .await
+        .unwrap();
+    revision = pack.revision;
+
+    let pack = input_uc
+        .upsert_ref_checked(
+            &id,
+            UpsertRefRequest {
+                section_key: "findings".into(),
+                ref_key: "finding-ref".into(),
+                path: "src/sample.rs".into(),
+                line_start: 1,
+                line_end: 1,
+                title: None,
+                why: None,
+                group: None,
+            },
+            revision,
+        )
+        .await
+        .unwrap();
+    revision = pack.revision;
+
+    let missing_qa = input_uc
+        .set_status_checked(&id, Status::Finalized, revision)
+        .await;
+    assert!(
+        matches!(
+            missing_qa,
+            Err(DomainError::FinalizeValidation {
+                missing_sections,
+                missing_fields,
+                ..
+            }) if missing_sections == vec!["qa".to_string()] && missing_fields.is_empty()
+        ),
+        "missing qa section must be reported explicitly"
+    );
+
+    let pack = input_uc
+        .upsert_section_checked(
+            &id,
+            "qa",
+            "QA".into(),
+            Some("checks run".into()),
+            None,
+            revision,
+        )
+        .await
+        .unwrap();
+    revision = pack.revision;
+
+    let missing_verdict = input_uc
+        .set_status_checked(&id, Status::Finalized, revision)
+        .await;
+    assert!(
+        matches!(
+            missing_verdict,
+            Err(DomainError::FinalizeValidation {
+                missing_sections,
+                missing_fields,
+                ..
+            }) if missing_sections.is_empty()
+                && missing_fields == vec!["qa.verdict".to_string()]
+        ),
+        "qa.verdict field must be enforced at finalize"
+    );
+}
+
+#[tokio::test]
+async fn test_draft_workflow_remains_flexible_before_finalize() {
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("packs");
+    let source_root = tmp.path().join("src");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::write(source_root.join("draft.rs"), "fn probe() {}\n").unwrap();
+
+    let (input_uc, _) = build_services(storage_dir, tmp.path().to_path_buf());
+    let pack = input_uc
+        .create_with_tags_ttl(Some("draft-flex-pack".into()), None, None, None, 30)
+        .await
+        .unwrap();
+    let id = pack.id.as_str().to_string();
+
+    let pack = input_uc
+        .upsert_section_checked(
+            &id,
+            "notes",
+            "Exploration notes".into(),
+            Some("still drafting".into()),
+            None,
+            pack.revision,
+        )
+        .await
+        .unwrap();
+    let pack = input_uc
+        .upsert_ref_checked(
+            &id,
+            UpsertRefRequest {
+                section_key: "notes".into(),
+                ref_key: "probe-ref".into(),
+                path: "src/draft.rs".into(),
+                line_start: 1,
+                line_end: 1,
+                title: None,
+                why: None,
+                group: None,
+            },
+            pack.revision,
+        )
+        .await
+        .unwrap();
+    let pack = input_uc
+        .set_meta_checked(
+            &id,
+            Some("Draft in progress".into()),
+            Some("No finalize sections yet".into()),
+            None,
+            pack.revision,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(pack.status, Status::Draft);
+    assert!(
+        pack.sections
+            .iter()
+            .any(|section| section.key.as_str() == "notes"),
+        "draft mutations should remain allowed without finalize checklist sections"
     );
 }
 
@@ -491,7 +712,25 @@ async fn test_stale_ref_in_output() {
         .unwrap();
     let id = pack.id.as_str().to_string();
     let pack = input_uc
-        .upsert_section_checked(&id, "sec-one", "S".into(), None, None, pack.revision)
+        .upsert_section_checked(
+            &id,
+            "scope",
+            "Scope".into(),
+            Some("scope context".into()),
+            None,
+            pack.revision,
+        )
+        .await
+        .unwrap();
+    let pack = input_uc
+        .upsert_section_checked(
+            &id,
+            "findings",
+            "Findings".into(),
+            Some("finding summary".into()),
+            None,
+            pack.revision,
+        )
         .await
         .unwrap();
     // Ref points to lines 10-20 (past end of 2-line file)
@@ -499,7 +738,7 @@ async fn test_stale_ref_in_output() {
         .upsert_ref_checked(
             &id,
             UpsertRefRequest {
-                section_key: "sec-one".into(),
+                section_key: "findings".into(),
                 ref_key: "ref-one".into(),
                 path: "src/short.rs".into(),
                 line_start: 10,
@@ -512,12 +751,29 @@ async fn test_stale_ref_in_output() {
         )
         .await
         .unwrap();
+    let pack = input_uc
+        .upsert_section_checked(
+            &id,
+            "qa",
+            "QA".into(),
+            Some("verdict: fail".into()),
+            None,
+            pack.revision,
+        )
+        .await
+        .unwrap();
     let finalize = input_uc
         .set_status_checked(&id, Status::Finalized, pack.revision)
         .await;
     assert!(
-        finalize.is_err(),
-        "finalize must fail-closed when refs are stale"
+        matches!(
+            finalize,
+            Err(DomainError::FinalizeValidation { invalid_refs, .. })
+            if !invalid_refs.is_empty()
+                && invalid_refs[0].section_key == "findings"
+                && invalid_refs[0].ref_key == "ref-one"
+        ),
+        "finalize must fail-closed with actionable invalid_refs details"
     );
 
     let rendered = output_uc.get_rendered(&id, None).await.unwrap();
@@ -635,14 +891,32 @@ async fn test_finalize_rejects_ref_when_line_end_exceeds_file_length() {
         .unwrap();
     let id = pack.id.as_str().to_string();
     let pack = input_uc
-        .upsert_section_checked(&id, "sec-one", "S".into(), None, None, pack.revision)
+        .upsert_section_checked(
+            &id,
+            "scope",
+            "Scope".into(),
+            Some("scope coverage".into()),
+            None,
+            pack.revision,
+        )
+        .await
+        .unwrap();
+    let pack = input_uc
+        .upsert_section_checked(
+            &id,
+            "findings",
+            "Findings".into(),
+            Some("finding summary".into()),
+            None,
+            pack.revision,
+        )
         .await
         .unwrap();
     let pack = input_uc
         .upsert_ref_checked(
             &id,
             UpsertRefRequest {
-                section_key: "sec-one".into(),
+                section_key: "findings".into(),
                 ref_key: "ref-one".into(),
                 path: "src/short.rs".into(),
                 line_start: 1,
@@ -655,13 +929,28 @@ async fn test_finalize_rejects_ref_when_line_end_exceeds_file_length() {
         )
         .await
         .unwrap();
+    let pack = input_uc
+        .upsert_section_checked(
+            &id,
+            "qa",
+            "QA".into(),
+            Some("verdict: fail".into()),
+            None,
+            pack.revision,
+        )
+        .await
+        .unwrap();
 
     let finalize = input_uc
         .set_status_checked(&id, Status::Finalized, pack.revision)
         .await;
     assert!(
-        finalize.is_err(),
-        "finalize must fail when line_end is stale"
+        matches!(
+            finalize,
+            Err(DomainError::FinalizeValidation { invalid_refs, .. })
+            if invalid_refs.iter().any(|issue| issue.ref_key == "ref-one")
+        ),
+        "finalize must fail with ref-level details when line_end is stale"
     );
 }
 
