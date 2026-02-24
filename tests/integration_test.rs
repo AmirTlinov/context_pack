@@ -1171,23 +1171,40 @@ async fn test_expired_pack_is_not_visible_immediately_in_list() {
     let storage_dir = tmp.path().join("packs");
     let (input_uc, _) = build_services(storage_dir.clone(), tmp.path().to_path_buf());
 
-    let pack = input_uc
+    let expiring_pack = input_uc
         .create_with_tags_ttl(Some("ttl-hidden".into()), None, None, None, 30)
         .await
         .unwrap();
-    let pack_id = pack.id.as_str().to_string();
-    let path = storage_dir.join(format!("{}.json", pack_id));
+    let expiring_pack_id = expiring_pack.id.as_str().to_string();
+    let expiring_path = storage_dir.join(format!("{}.json", expiring_pack_id));
 
-    let raw = std::fs::read_to_string(&path).unwrap();
+    let raw = std::fs::read_to_string(&expiring_path).unwrap();
     let mut data: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    data["expires_at"] = serde_json::Value::String("2000-01-01T00:00:00Z".into());
+    data["expires_at"] =
+        serde_json::Value::String((Utc::now() - Duration::seconds(1)).to_rfc3339());
     let new_json = serde_json::to_string(&data).unwrap();
-    std::fs::write(path, new_json).unwrap();
+    std::fs::write(expiring_path, new_json).unwrap();
+
+    let stale_pack = input_uc
+        .create_with_tags_ttl(Some("ttl-gone".into()), None, None, None, 30)
+        .await
+        .unwrap();
+    let stale_pack_id = stale_pack.id.as_str().to_string();
+    let stale_path = storage_dir.join(format!("{}.json", stale_pack_id));
+    let stale_raw = std::fs::read_to_string(&stale_path).unwrap();
+    let mut stale_data: serde_json::Value = serde_json::from_str(&stale_raw).unwrap();
+    stale_data["expires_at"] =
+        serde_json::Value::String((Utc::now() - Duration::seconds(2000)).to_rfc3339());
+    std::fs::write(stale_path, serde_json::to_string(&stale_data).unwrap()).unwrap();
 
     let listed = input_uc.list(None, None, None, None).await.unwrap();
     assert!(
-        listed.iter().all(|p| p.id.as_str() != pack_id),
+        listed.iter().all(|p| p.id.as_str() != expiring_pack_id),
         "expired pack must be invisible in list"
+    );
+    assert!(
+        listed.iter().all(|p| p.id.as_str() != stale_pack_id),
+        "past-grace expired packs must remain invisible in stale-safe list"
     );
 
     let expired_only = input_uc
@@ -1195,9 +1212,20 @@ async fn test_expired_pack_is_not_visible_immediately_in_list() {
         .await
         .unwrap();
     assert!(
-        expired_only.iter().any(|p| p.id.as_str() == pack_id),
-        "freshness filter must surface expired packs intentionally"
+        expired_only
+            .iter()
+            .any(|p| p.id.as_str() == expiring_pack_id),
+        "freshness filter must surface expired packs within grace"
     );
+    assert!(
+        expired_only.iter().all(|p| p.id.as_str() != stale_pack_id),
+        "past-grace expired packs should not appear in expired filter"
+    );
+
+    assert!(matches!(
+        input_uc.get(&stale_pack_id).await.unwrap_err(),
+        mcp_context_pack::domain::errors::DomainError::NotFound(_)
+    ));
 }
 
 #[tokio::test]

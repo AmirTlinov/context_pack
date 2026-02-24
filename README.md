@@ -108,6 +108,7 @@ CONTEXT_PACK_LOG = "mcp_context_pack=info"
 CONTEXT_PACK_INITIALIZE_TIMEOUT_MS = "20000"
 CONTEXT_PACK_MAX_PACK_BYTES = "524288"
 CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
+CONTEXT_PACK_EXPIRED_GRACE_SECONDS = "900"
 ```
 
 ### Generic `mcp.json`
@@ -124,7 +125,8 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
         "CONTEXT_PACK_LOG": "mcp_context_pack=info",
         "CONTEXT_PACK_INITIALIZE_TIMEOUT_MS": "20000",
         "CONTEXT_PACK_MAX_PACK_BYTES": "524288",
-        "CONTEXT_PACK_MAX_SOURCE_BYTES": "2097152"
+        "CONTEXT_PACK_MAX_SOURCE_BYTES": "2097152",
+        "CONTEXT_PACK_EXPIRED_GRACE_SECONDS": "900"
       }
     }
   }
@@ -143,6 +145,7 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 | `CONTEXT_PACK_INITIALIZE_TIMEOUT_MS` | Wait timeout for first MCP `initialize` |
 | `CONTEXT_PACK_MAX_PACK_BYTES` | Max bytes per stored pack file |
 | `CONTEXT_PACK_MAX_SOURCE_BYTES` | Max bytes per source file when rendering excerpts |
+| `CONTEXT_PACK_EXPIRED_GRACE_SECONDS` | Grace window (seconds) for `expired` packs before purge/not_found (default `900`) |
 
 > Recommendation: set `CONTEXT_PACK_ROOT` to a **root directory**, not to `.../packs`.
 >
@@ -186,6 +189,7 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
   - `expiring_soon`
   - `expired`
 - Default list behavior is stale-safe: expired packs are hidden unless `freshness=expired` is requested explicitly.
+- Expired packs remain readable via `freshness=expired` for `CONTEXT_PACK_EXPIRED_GRACE_SECONDS` (default `900`) then are treated as unavailable.
 - `output read` additive args: `profile(orchestrator|reviewer|executor)`, `limit`, `offset`, `page_token`, `contains` (case-insensitive substring).
 - Default `output read` uses `profile=orchestrator`: **compact handoff-first page** bounded by default `limit=6`.
 - `profile=reviewer` returns full evidence/snippets (deep review).
@@ -530,7 +534,8 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
         "CONTEXT_PACK_LOG": "mcp_context_pack=info",
         "CONTEXT_PACK_INITIALIZE_TIMEOUT_MS": "20000",
         "CONTEXT_PACK_MAX_PACK_BYTES": "524288",
-        "CONTEXT_PACK_MAX_SOURCE_BYTES": "2097152"
+        "CONTEXT_PACK_MAX_SOURCE_BYTES": "2097152",
+        "CONTEXT_PACK_EXPIRED_GRACE_SECONDS": "900"
       }
     }
   }
@@ -549,6 +554,7 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 | `CONTEXT_PACK_INITIALIZE_TIMEOUT_MS` | Таймаут ожидания первого MCP `initialize` |
 | `CONTEXT_PACK_MAX_PACK_BYTES` | Максимальный размер файла пакета в байтах |
 | `CONTEXT_PACK_MAX_SOURCE_BYTES` | Максимальный размер исходного файла при рендеринге вырезок |
+| `CONTEXT_PACK_EXPIRED_GRACE_SECONDS` | Сколько секунд истекший pack остаётся доступен как `expired` перед purge/not_found (по умолчанию `900`) |
 
 > Рекомендация: задавайте `CONTEXT_PACK_ROOT` как **корневую папку**, не как `.../packs`.
 >
@@ -592,6 +598,7 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
   - `expiring_soon`
   - `expired`
 - Поведение list по умолчанию stale-safe: expired-пакеты скрыты, пока явно не запрошен `freshness=expired`.
+- Истёкшие пакеты видны через `freshness=expired` в течение окна `CONTEXT_PACK_EXPIRED_GRACE_SECONDS` (по умолчанию `900`), после чего считаются отсутствующими.
 - Дополнительные аргументы `output get`: `mode(full|compact)`, `limit`, `offset`, `cursor`, `match` (regex).
 - По умолчанию `output get` отдаёт **compact handoff-first страницу** (`mode=compact`, bounded `limit=6`), чтобы оркестратор принимал решение без перегруза.
 - Compact handoff включает: objective/scope, verdict/status, top risks/gaps, freshness и deep-nav hints.

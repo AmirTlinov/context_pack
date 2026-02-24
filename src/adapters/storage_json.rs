@@ -18,6 +18,7 @@ use crate::{
 };
 
 const DEFAULT_MAX_PACK_BYTES: usize = 512 * 1024;
+const DEFAULT_EXPIRED_GRACE_SECONDS: i64 = 900;
 
 /// Minimal pack metadata needed for TTL purge scanning.
 /// Avoids deserializing full Pack (sections, refs, diagrams).
@@ -32,6 +33,14 @@ fn parse_max_pack_bytes_from_env() -> usize {
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_MAX_PACK_BYTES)
+}
+
+fn parse_expired_grace_seconds_from_env() -> i64 {
+    std::env::var("CONTEXT_PACK_EXPIRED_GRACE_SECONDS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .filter(|value| *value >= 0)
+        .unwrap_or(DEFAULT_EXPIRED_GRACE_SECONDS)
 }
 
 fn conflict_changed_section_keys(current: &Pack, attempted: &Pack) -> Vec<String> {
@@ -66,6 +75,7 @@ fn conflict_changed_section_keys(current: &Pack, attempted: &Pack) -> Vec<String
 pub struct JsonStorageAdapter {
     pub(crate) storage_dir: PathBuf,
     max_pack_bytes: usize,
+    expired_grace_seconds: i64,
 }
 
 impl JsonStorageAdapter {
@@ -73,6 +83,7 @@ impl JsonStorageAdapter {
         Self {
             storage_dir,
             max_pack_bytes: parse_max_pack_bytes_from_env(),
+            expired_grace_seconds: parse_expired_grace_seconds_from_env(),
         }
     }
 
@@ -98,7 +109,30 @@ impl JsonStorageAdapter {
         Self {
             storage_dir,
             max_pack_bytes,
+            expired_grace_seconds: DEFAULT_EXPIRED_GRACE_SECONDS,
         }
+    }
+
+    #[cfg(test)]
+    fn new_with_max_and_grace(
+        storage_dir: PathBuf,
+        max_pack_bytes: usize,
+        expired_grace_seconds: i64,
+    ) -> Self {
+        Self {
+            storage_dir,
+            max_pack_bytes,
+            expired_grace_seconds,
+        }
+    }
+
+    fn is_within_grace_window(
+        now: chrono::DateTime<chrono::Utc>,
+        expires_at: chrono::DateTime<chrono::Utc>,
+        expired_grace_seconds: i64,
+    ) -> bool {
+        let grace = chrono::Duration::seconds(expired_grace_seconds.max(0));
+        now <= expires_at + grace
     }
 
     fn payload_too_large_error(path: &str, actual: usize, max: usize) -> DomainError {
@@ -280,16 +314,20 @@ impl JsonStorageAdapter {
         })
     }
 
-    fn purge_expired_sync(storage_dir: &Path, max_pack_bytes: usize) -> Result<()> {
+    fn purge_expired_sync(
+        storage_dir: &Path,
+        max_pack_bytes: usize,
+        expired_grace_seconds: i64,
+    ) -> Result<()> {
         let now = Utc::now();
         let paths = Self::list_pack_paths_sync(storage_dir)?;
         for path in paths {
             let meta = Self::read_pack_meta_from_path(&path, max_pack_bytes);
-            let is_expired = meta
-                .and_then(|m| m.expires_at)
-                .map(|t| t <= now)
-                .unwrap_or(false);
-            if is_expired {
+            let is_expired_after_grace =
+                meta.and_then(|m| m.expires_at).is_some_and(|expires_at| {
+                    !Self::is_within_grace_window(now, expires_at, expired_grace_seconds)
+                });
+            if is_expired_after_grace {
                 match std::fs::remove_file(&path) {
                     Ok(()) => {}
                     Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -336,11 +374,17 @@ impl JsonStorageAdapter {
         Ok(packs)
     }
 
-    fn load_all_active_sync(storage_dir: &Path, max_pack_bytes: usize) -> Result<Vec<Pack>> {
+    fn load_all_active_sync(
+        storage_dir: &Path,
+        max_pack_bytes: usize,
+        expired_grace_seconds: i64,
+    ) -> Result<Vec<Pack>> {
         let now = Utc::now();
         Ok(Self::load_all_sync(storage_dir, max_pack_bytes)?
             .into_iter()
-            .filter(|pack| !pack.is_expired(now))
+            .filter(|pack| {
+                Self::is_within_grace_window(now, pack.expires_at, expired_grace_seconds)
+            })
             .collect())
     }
 
@@ -429,6 +473,7 @@ impl JsonStorageAdapter {
     async fn purge_expired_locked(&self) -> Result<()> {
         let storage_dir = self.storage_dir.clone();
         let max_pack_bytes = self.max_pack_bytes;
+        let expired_grace_seconds = self.expired_grace_seconds;
         task::spawn_blocking(move || -> Result<()> {
             Self::ensure_dir_sync(&storage_dir)?;
             let lock_path = Self::repo_lock_path(&storage_dir);
@@ -447,7 +492,7 @@ impl JsonStorageAdapter {
                 })?;
             lock.lock_exclusive()
                 .map_err(|e| DomainError::Io(format!("failed to lock repo: {}", e)))?;
-            Self::purge_expired_sync(&storage_dir, max_pack_bytes)?;
+            Self::purge_expired_sync(&storage_dir, max_pack_bytes, expired_grace_seconds)?;
             lock.unlock()
                 .map_err(|e| DomainError::Io(format!("failed to unlock repo: {}", e)))?;
             Ok(())
@@ -463,6 +508,7 @@ impl PackRepositoryPort for JsonStorageAdapter {
     async fn create_new(&self, pack: &Pack) -> Result<()> {
         let storage_dir = self.storage_dir.clone();
         let max_pack_bytes = self.max_pack_bytes;
+        let expired_grace_seconds = self.expired_grace_seconds;
         let pack = pack.clone();
         task::spawn_blocking(move || -> Result<()> {
             Self::ensure_dir_sync(&storage_dir)?;
@@ -482,7 +528,7 @@ impl PackRepositoryPort for JsonStorageAdapter {
                 })?;
             lock.lock_exclusive()
                 .map_err(|e| DomainError::Io(format!("failed to lock repo: {}", e)))?;
-            Self::purge_expired_sync(&storage_dir, max_pack_bytes)?;
+            Self::purge_expired_sync(&storage_dir, max_pack_bytes, expired_grace_seconds)?;
 
             let path = Self::pack_path(&storage_dir, &pack.id);
             if path.exists() {
@@ -524,6 +570,7 @@ impl PackRepositoryPort for JsonStorageAdapter {
     async fn save_with_expected_revision(&self, pack: &Pack, expected_revision: u64) -> Result<()> {
         let storage_dir = self.storage_dir.clone();
         let max_pack_bytes = self.max_pack_bytes;
+        let expired_grace_seconds = self.expired_grace_seconds;
         let pack = pack.clone();
         task::spawn_blocking(move || -> Result<()> {
             Self::ensure_dir_sync(&storage_dir)?;
@@ -543,7 +590,7 @@ impl PackRepositoryPort for JsonStorageAdapter {
                 })?;
             lock.lock_exclusive()
                 .map_err(|e| DomainError::Io(format!("failed to lock repo: {}", e)))?;
-            Self::purge_expired_sync(&storage_dir, max_pack_bytes)?;
+            Self::purge_expired_sync(&storage_dir, max_pack_bytes, expired_grace_seconds)?;
 
             let path = Self::pack_path(&storage_dir, &pack.id);
             if !path.exists() {
@@ -616,6 +663,7 @@ impl PackRepositoryPort for JsonStorageAdapter {
         let storage_dir = self.storage_dir.clone();
         let id = id.clone();
         let max_pack_bytes = self.max_pack_bytes;
+        let expired_grace_seconds = self.expired_grace_seconds;
         task::spawn_blocking(move || -> Result<Option<Pack>> {
             let path = Self::pack_path(&storage_dir, &id);
             if !path.exists() {
@@ -625,7 +673,7 @@ impl PackRepositoryPort for JsonStorageAdapter {
                 Some(pack) => pack,
                 None => return Ok(None),
             };
-            if pack.is_expired(Utc::now()) {
+            if !Self::is_within_grace_window(Utc::now(), pack.expires_at, expired_grace_seconds) {
                 match std::fs::remove_file(&path) {
                     Ok(()) => {}
                     Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -648,12 +696,14 @@ impl PackRepositoryPort for JsonStorageAdapter {
     async fn get_by_name(&self, name: &PackName) -> Result<Option<Pack>> {
         let storage_dir = self.storage_dir.clone();
         let max_pack_bytes = self.max_pack_bytes;
+        let expired_grace_seconds = self.expired_grace_seconds;
         let name = name.clone();
         task::spawn_blocking(move || -> Result<Option<Pack>> {
-            let matches = Self::load_all_active_sync(&storage_dir, max_pack_bytes)?
-                .into_iter()
-                .filter(|pack| pack.name.as_ref() == Some(&name))
-                .collect::<Vec<_>>();
+            let matches =
+                Self::load_all_active_sync(&storage_dir, max_pack_bytes, expired_grace_seconds)?
+                    .into_iter()
+                    .filter(|pack| pack.name.as_ref() == Some(&name))
+                    .collect::<Vec<_>>();
             Self::select_pack_by_name(&name, matches)
         })
         .await
@@ -663,6 +713,7 @@ impl PackRepositoryPort for JsonStorageAdapter {
     async fn list_packs(&self, filter: ListFilter) -> Result<Vec<Pack>> {
         let storage_dir = self.storage_dir.clone();
         let max_pack_bytes = self.max_pack_bytes;
+        let expired_grace_seconds = self.expired_grace_seconds;
         task::spawn_blocking(move || -> Result<Vec<Pack>> {
             let now = Utc::now();
             let packs = Self::load_all_sync(&storage_dir, max_pack_bytes)?;
@@ -677,8 +728,14 @@ impl PackRepositoryPort for JsonStorageAdapter {
                 .into_iter()
                 .filter(|pack| {
                     let freshness_state = FreshnessState::from_pack(pack, now);
+                    let is_within_grace =
+                        Self::is_within_grace_window(now, pack.expires_at, expired_grace_seconds);
                     if let Some(required_freshness) = freshness_filter {
-                        if freshness_state != required_freshness {
+                        if required_freshness == FreshnessState::Expired {
+                            if freshness_state != FreshnessState::Expired || !is_within_grace {
+                                return false;
+                            }
+                        } else if freshness_state != required_freshness {
                             return false;
                         }
                     } else if freshness_state == FreshnessState::Expired {
@@ -735,9 +792,9 @@ mod tests {
         Pack::new(PackId::new(), Some(PackName::new("test-pack").unwrap()))
     }
 
-    fn make_expired_pack() -> Pack {
-        let mut pack = Pack::new(PackId::new(), None);
-        pack.expires_at = Utc::now() - Duration::seconds(1);
+    fn make_pack_with_expiry_delta(delta_seconds: i64) -> Pack {
+        let mut pack = make_pack();
+        pack.expires_at = Utc::now() + Duration::seconds(delta_seconds);
         pack
     }
 
@@ -836,7 +893,7 @@ mod tests {
     fn test_purge_expired_removes_only_expired() {
         let dir = tempdir().unwrap();
         let active = make_pack();
-        let expired = make_expired_pack();
+        let expired = make_pack_with_expiry_delta(-(DEFAULT_EXPIRED_GRACE_SECONDS + 1));
 
         // Write both packs
         JsonStorageAdapter::write_pack_atomic(dir.path(), &active, DEFAULT_MAX_PACK_BYTES).unwrap();
@@ -854,7 +911,12 @@ mod tests {
             .exists());
 
         // Run purge
-        JsonStorageAdapter::purge_expired_sync(dir.path(), DEFAULT_MAX_PACK_BYTES).unwrap();
+        JsonStorageAdapter::purge_expired_sync(
+            dir.path(),
+            DEFAULT_MAX_PACK_BYTES,
+            DEFAULT_EXPIRED_GRACE_SECONDS,
+        )
+        .unwrap();
 
         // Active pack should remain, expired should be gone
         assert!(
@@ -868,6 +930,35 @@ mod tests {
                 .join(format!("{}.json", expired.id.as_str()))
                 .exists(),
             "expired pack should have been removed"
+        );
+    }
+
+    #[test]
+    fn test_purge_expired_keeps_within_grace_window() {
+        let dir = tempdir().unwrap();
+        let active = make_pack();
+        let expired = make_pack_with_expiry_delta(-(DEFAULT_EXPIRED_GRACE_SECONDS - 1));
+
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &active, DEFAULT_MAX_PACK_BYTES).unwrap();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &expired, DEFAULT_MAX_PACK_BYTES)
+            .unwrap();
+
+        JsonStorageAdapter::purge_expired_sync(
+            dir.path(),
+            DEFAULT_MAX_PACK_BYTES,
+            DEFAULT_EXPIRED_GRACE_SECONDS,
+        )
+        .unwrap();
+
+        assert!(dir
+            .path()
+            .join(format!("{}.json", active.id.as_str()))
+            .exists());
+        assert!(
+            dir.path()
+                .join(format!("{}.json", expired.id.as_str()))
+                .exists(),
+            "expired pack should be retained during grace"
         );
     }
 
@@ -905,7 +996,8 @@ mod tests {
             "oversized pack should exist before purge"
         );
 
-        JsonStorageAdapter::purge_expired_sync(dir.path(), max).unwrap();
+        JsonStorageAdapter::purge_expired_sync(dir.path(), max, DEFAULT_EXPIRED_GRACE_SECONDS)
+            .unwrap();
 
         assert!(active_path.exists(), "active pack should remain");
         assert!(
@@ -919,17 +1011,21 @@ mod tests {
     }
 
     #[test]
-    fn test_load_all_active_excludes_expired() {
+    fn test_load_all_active_excludes_expired_after_grace() {
         let dir = tempdir().unwrap();
         let active = make_pack();
-        let expired = make_expired_pack();
+        let expired = make_pack_with_expiry_delta(-(DEFAULT_EXPIRED_GRACE_SECONDS + 1));
 
         JsonStorageAdapter::write_pack_atomic(dir.path(), &active, DEFAULT_MAX_PACK_BYTES).unwrap();
         JsonStorageAdapter::write_pack_atomic(dir.path(), &expired, DEFAULT_MAX_PACK_BYTES)
             .unwrap();
 
-        let loaded =
-            JsonStorageAdapter::load_all_active_sync(dir.path(), DEFAULT_MAX_PACK_BYTES).unwrap();
+        let loaded = JsonStorageAdapter::load_all_active_sync(
+            dir.path(),
+            DEFAULT_MAX_PACK_BYTES,
+            DEFAULT_EXPIRED_GRACE_SECONDS,
+        )
+        .unwrap();
 
         assert_eq!(loaded.len(), 1, "only 1 active pack expected");
         assert_eq!(
@@ -952,14 +1048,27 @@ mod tests {
         expiring.expires_at =
             now + Duration::seconds(FreshnessState::EXPIRING_SOON_THRESHOLD_SECONDS);
 
-        let mut expired = make_named_pack_with("freshness-c", Status::Draft, now, 1);
-        expired.expires_at = now - Duration::seconds(1);
+        let mut expired_within_grace = make_named_pack_with("freshness-c", Status::Draft, now, 1);
+        expired_within_grace.expires_at = now - Duration::seconds(1);
+
+        let mut expired_after_grace = make_named_pack_with("freshness-d", Status::Draft, now, 1);
+        expired_after_grace.expires_at = now - Duration::seconds(DEFAULT_EXPIRED_GRACE_SECONDS + 1);
 
         JsonStorageAdapter::write_pack_atomic(dir.path(), &fresh, DEFAULT_MAX_PACK_BYTES).unwrap();
         JsonStorageAdapter::write_pack_atomic(dir.path(), &expiring, DEFAULT_MAX_PACK_BYTES)
             .unwrap();
-        JsonStorageAdapter::write_pack_atomic(dir.path(), &expired, DEFAULT_MAX_PACK_BYTES)
-            .unwrap();
+        JsonStorageAdapter::write_pack_atomic(
+            dir.path(),
+            &expired_within_grace,
+            DEFAULT_MAX_PACK_BYTES,
+        )
+        .unwrap();
+        JsonStorageAdapter::write_pack_atomic(
+            dir.path(),
+            &expired_after_grace,
+            DEFAULT_MAX_PACK_BYTES,
+        )
+        .unwrap();
 
         let default_list = adapter.list_packs(ListFilter::default()).await.unwrap();
         let default_ids = default_list
@@ -969,8 +1078,12 @@ mod tests {
         assert!(default_ids.contains(&fresh.id.as_str().to_string()));
         assert!(default_ids.contains(&expiring.id.as_str().to_string()));
         assert!(
-            !default_ids.contains(&expired.id.as_str().to_string()),
+            !default_ids.contains(&expired_after_grace.id.as_str().to_string()),
             "default list must stay stale-safe and hide expired packs"
+        );
+        assert!(
+            !default_ids.contains(&expired_within_grace.id.as_str().to_string()),
+            "default list should hide expired packs unless freshness=expired"
         );
 
         let expired_only = adapter
@@ -980,8 +1093,17 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(expired_only.len(), 1, "only expired should match");
-        assert_eq!(expired_only[0].id, expired.id);
+        let expired_ids = expired_only
+            .iter()
+            .map(|pack| pack.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expired_ids.len(),
+            1,
+            "only currently expired packs should match"
+        );
+        assert_eq!(expired_only[0].id, expired_within_grace.id);
+        assert!(!expired_ids.contains(&expired_after_grace.id.as_str()));
 
         let expiring_only = adapter
             .list_packs(ListFilter {
@@ -1169,7 +1291,12 @@ mod tests {
         std::fs::write(&oversized_path, oversized_payload).unwrap();
         assert!(oversized_path.exists(), "oversized pack file should exist");
 
-        let loaded = JsonStorageAdapter::load_all_active_sync(dir.path(), max).unwrap();
+        let loaded = JsonStorageAdapter::load_all_active_sync(
+            dir.path(),
+            max,
+            DEFAULT_EXPIRED_GRACE_SECONDS,
+        )
+        .unwrap();
         assert_eq!(loaded.len(), 1, "expected only one valid pack");
         assert_eq!(loaded[0].id, valid.id);
 
@@ -1198,6 +1325,25 @@ mod tests {
             !path.exists(),
             "corrupt pack file should be removed by recovery"
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_by_id_keeps_in_grace_and_cleans_after_grace() {
+        let dir = tempdir().unwrap();
+        let adapter = JsonStorageAdapter::new_with_max_and_grace(dir.path().to_path_buf(), 1024, 5);
+        let in_grace = make_pack_with_expiry_delta(-4);
+        let past_grace = make_pack_with_expiry_delta(-6);
+        let in_grace_path = dir.path().join(format!("{}.json", in_grace.id.as_str()));
+        let past_grace_path = dir.path().join(format!("{}.json", past_grace.id.as_str()));
+
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &in_grace, 1024).unwrap();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &past_grace, 1024).unwrap();
+
+        assert!(adapter.get_by_id(&in_grace.id).await.unwrap().is_some());
+        assert!(in_grace_path.exists());
+
+        assert!(adapter.get_by_id(&past_grace.id).await.unwrap().is_none());
+        assert!(!past_grace_path.exists());
     }
 
     #[test]
