@@ -2443,6 +2443,8 @@ async fn e2e_freshness_metadata_filters_and_warnings() -> Result<()> {
             parse_tool_payload(&client.call(create_pack(3, "expiring-pack")).await?)?;
         let created_expired =
             parse_tool_payload(&client.call(create_pack(4, "expired-pack")).await?)?;
+        let created_stale =
+            parse_tool_payload(&client.call(create_pack(5, "past-expired-pack")).await?)?;
 
         let fresh_id = created_fresh["payload"]["id"]
             .as_str()
@@ -2456,6 +2458,10 @@ async fn e2e_freshness_metadata_filters_and_warnings() -> Result<()> {
             .as_str()
             .context("missing expired id")?
             .to_string();
+        let stale_id = created_stale["payload"]["id"]
+            .as_str()
+            .context("missing stale id")?
+            .to_string();
 
         let patch_expiry = |pack_id: &str, expires_at: chrono::DateTime<Utc>| -> Result<()> {
             let path = storage_root.join("packs").join(format!("{}.json", pack_id));
@@ -2468,11 +2474,12 @@ async fn e2e_freshness_metadata_filters_and_warnings() -> Result<()> {
 
         patch_expiry(&expiring_id, Utc::now() + Duration::seconds(60))?;
         patch_expiry(&expired_id, Utc::now() - Duration::seconds(5))?;
+        patch_expiry(&stale_id, Utc::now() - Duration::seconds(2000))?;
 
         let input_list_default = client
             .call(json!({
                 "jsonrpc":"2.0",
-                "id":5,
+                "id":6,
                 "method":"tools/call",
                 "params":{
                     "name":"input",
@@ -2510,7 +2517,7 @@ async fn e2e_freshness_metadata_filters_and_warnings() -> Result<()> {
         let input_list_expired = client
             .call(json!({
                 "jsonrpc":"2.0",
-                "id":6,
+                "id":7,
                 "method":"tools/call",
                 "params":{
                     "name":"input",
@@ -2531,6 +2538,9 @@ async fn e2e_freshness_metadata_filters_and_warnings() -> Result<()> {
             "expired filter should isolate stale pack"
         );
         assert_eq!(expired_packs[0]["id"], Value::String(expired_id.clone()));
+        assert!(!expired_packs
+            .iter()
+            .any(|pack| pack["id"] == Value::String(stale_id.clone())));
         assert_eq!(
             expired_packs[0]["freshness_state"],
             Value::String("expired".into())
@@ -2539,7 +2549,7 @@ async fn e2e_freshness_metadata_filters_and_warnings() -> Result<()> {
         let input_get = client
             .call(json!({
                 "jsonrpc":"2.0",
-                "id":7,
+                "id":8,
                 "method":"tools/call",
                 "params":{
                     "name":"input",
@@ -2564,7 +2574,7 @@ async fn e2e_freshness_metadata_filters_and_warnings() -> Result<()> {
         let output_get = client
             .call(json!({
                 "jsonrpc":"2.0",
-                "id":8,
+                "id":9,
                 "method":"tools/call",
                 "params":{
                     "name":"output",
@@ -2590,7 +2600,7 @@ async fn e2e_freshness_metadata_filters_and_warnings() -> Result<()> {
         let output_list_expired = client
             .call(json!({
                 "jsonrpc":"2.0",
-                "id":9,
+                "id":10,
                 "method":"tools/call",
                 "params":{
                     "name":"output",
@@ -2605,6 +2615,10 @@ async fn e2e_freshness_metadata_filters_and_warnings() -> Result<()> {
         assert!(
             expired_markdown.contains(&expired_id),
             "output list freshness=expired must surface expired pack"
+        );
+        assert!(
+            !expired_markdown.contains(&stale_id),
+            "past-grace expired pack should not be surfaced"
         );
         assert!(
             expired_markdown.contains("warning: expired"),
