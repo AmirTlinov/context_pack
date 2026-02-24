@@ -3,11 +3,13 @@ use serde_json::{json, Value};
 use crate::app::input_usecases::{
     InputUseCases, TouchTtlMode, UpsertDiagramRequest, UpsertRefRequest,
 };
+use crate::app::ports::FreshnessState;
 use crate::domain::errors::DomainError;
+use crate::domain::models::Pack;
 
 use super::{
-    pack_summary, req_identifier, req_status, req_str, req_u64, req_usize, status_opt, str_opt,
-    tags_opt, tool_success, u64_opt, usize_opt,
+    freshness_opt, pack_summary, req_identifier, req_status, req_str, req_u64, req_usize,
+    status_opt, str_opt, tags_opt, tool_success, u64_opt, usize_opt,
 };
 
 pub(super) async fn handle_input_tool(
@@ -22,10 +24,13 @@ pub(super) async fn handle_input_tool(
     match action {
         "list" => {
             let status = status_opt(args, "status")?;
+            let freshness = freshness_opt(args, "freshness")?;
             let query = str_opt(args, "query");
             let limit = usize_opt(args, "limit")?;
             let offset = usize_opt(args, "offset")?;
-            let packs = uc.list(status, query, limit, offset).await?;
+            let packs = uc
+                .list_with_freshness(status, query, limit, offset, freshness)
+                .await?;
             let summaries: Vec<Value> = packs.iter().map(pack_summary).collect();
             tool_success(
                 "list",
@@ -49,7 +54,7 @@ pub(super) async fn handle_input_tool(
         "get" => {
             let ident = req_identifier(args)?;
             let pack = uc.get(&ident).await?;
-            tool_success("get", serde_json::to_value(pack)?)
+            tool_success("get", pack_with_freshness_metadata(pack)?)
         }
         "upsert_section" => {
             reject_legacy_alias(args, "title", "section_title")?;
@@ -187,6 +192,35 @@ pub(super) async fn handle_input_tool(
             action
         ))),
     }
+}
+
+fn pack_with_freshness_metadata(pack: Pack) -> Result<Value, DomainError> {
+    let now = chrono::Utc::now();
+    let ttl_remaining_seconds = pack.ttl_remaining_seconds(now);
+    let ttl_remaining_human = pack.ttl_remaining_human(now);
+    let freshness_state = FreshnessState::from_ttl_seconds(ttl_remaining_seconds);
+    let mut payload = serde_json::to_value(pack)?;
+    let object = payload.as_object_mut().ok_or_else(|| {
+        DomainError::InvalidData("internal error: expected pack payload object".into())
+    })?;
+
+    object.insert(
+        "ttl_remaining_seconds".to_string(),
+        Value::from(ttl_remaining_seconds),
+    );
+    object.insert(
+        "ttl_remaining_human".to_string(),
+        Value::String(ttl_remaining_human.clone()),
+    );
+    object.insert(
+        "ttl_remaining".to_string(),
+        Value::String(ttl_remaining_human),
+    );
+    object.insert(
+        "freshness_state".to_string(),
+        serde_json::to_value(freshness_state)?,
+    );
+    Ok(payload)
 }
 
 fn reject_legacy_alias(

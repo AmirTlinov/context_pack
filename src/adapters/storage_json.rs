@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use tokio::task;
 
 use crate::{
-    app::ports::{ListFilter, PackRepositoryPort},
+    app::ports::{FreshnessState, ListFilter, PackRepositoryPort},
     domain::{
         errors::{DomainError, Result},
         models::Pack,
@@ -287,17 +287,14 @@ impl JsonStorageAdapter {
         }
     }
 
-    fn load_all_active_sync(storage_dir: &Path, max_pack_bytes: usize) -> Result<Vec<Pack>> {
-        let now = Utc::now();
+    fn load_all_sync(storage_dir: &Path, max_pack_bytes: usize) -> Result<Vec<Pack>> {
         let mut packs = Vec::new();
         for path in Self::list_pack_paths_sync(storage_dir)? {
             let pack = match Self::read_pack_for_lookup(&path, max_pack_bytes)? {
                 Some(pack) => pack,
                 None => continue,
             };
-            if !pack.is_expired(now) {
-                packs.push(pack);
-            }
+            packs.push(pack);
         }
         packs.sort_by(|a, b| {
             b.updated_at
@@ -306,6 +303,14 @@ impl JsonStorageAdapter {
                 .then_with(|| a.id.as_str().cmp(b.id.as_str()))
         });
         Ok(packs)
+    }
+
+    fn load_all_active_sync(storage_dir: &Path, max_pack_bytes: usize) -> Result<Vec<Pack>> {
+        let now = Utc::now();
+        Ok(Self::load_all_sync(storage_dir, max_pack_bytes)?
+            .into_iter()
+            .filter(|pack| !pack.is_expired(now))
+            .collect())
     }
 
     fn candidate_ids(candidates: &[Pack]) -> Vec<String> {
@@ -625,20 +630,33 @@ impl PackRepositoryPort for JsonStorageAdapter {
         let storage_dir = self.storage_dir.clone();
         let max_pack_bytes = self.max_pack_bytes;
         task::spawn_blocking(move || -> Result<Vec<Pack>> {
-            let packs = Self::load_all_active_sync(&storage_dir, max_pack_bytes)?;
+            let now = Utc::now();
+            let packs = Self::load_all_sync(&storage_dir, max_pack_bytes)?;
+            let status_filter = filter.status;
+            let freshness_filter = filter.freshness;
+            let query_lower = filter
+                .query
+                .as_ref()
+                .map(|query| query.trim().to_lowercase())
+                .filter(|query| !query.is_empty());
             let filtered: Vec<Pack> = packs
                 .into_iter()
                 .filter(|pack| {
-                    if let Some(s) = filter.status {
+                    let freshness_state = FreshnessState::from_pack(pack, now);
+                    if let Some(required_freshness) = freshness_filter {
+                        if freshness_state != required_freshness {
+                            return false;
+                        }
+                    } else if freshness_state == FreshnessState::Expired {
+                        // Stale-safe default: keep expired packs hidden unless explicitly asked.
+                        return false;
+                    }
+                    if let Some(s) = status_filter {
                         if pack.status != s {
                             return false;
                         }
                     }
-                    if let Some(ref q) = filter.query {
-                        let q_lower = q.trim().to_lowercase();
-                        if q_lower.is_empty() {
-                            return true;
-                        }
+                    if let Some(ref q_lower) = query_lower {
                         let haystack = format!(
                             "{} {} {}",
                             pack.title.as_deref().unwrap_or(""),
@@ -646,7 +664,7 @@ impl PackRepositoryPort for JsonStorageAdapter {
                             pack.brief.as_deref().unwrap_or("")
                         )
                         .to_lowercase();
-                        if !haystack.contains(&q_lower) {
+                        if !haystack.contains(q_lower.as_str()) {
                             return false;
                         }
                     }
@@ -673,6 +691,7 @@ impl PackRepositoryPort for JsonStorageAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ports::FreshnessState;
     use crate::domain::types::{PackId, PackName, Status};
     use chrono::{Duration, Utc};
     use std::path::Path;
@@ -883,6 +902,62 @@ mod tests {
             loaded[0].id, active.id,
             "loaded pack should be the active one"
         );
+    }
+
+    #[tokio::test]
+    async fn test_list_packs_filters_by_freshness_and_can_surface_expired() {
+        let dir = tempdir().unwrap();
+        let adapter =
+            JsonStorageAdapter::new_with_max(dir.path().to_path_buf(), DEFAULT_MAX_PACK_BYTES);
+        let now = Utc::now();
+
+        let mut fresh = make_named_pack_with("freshness-a", Status::Draft, now, 1);
+        fresh.expires_at = now + Duration::minutes(30);
+
+        let mut expiring = make_named_pack_with("freshness-b", Status::Draft, now, 1);
+        expiring.expires_at =
+            now + Duration::seconds(FreshnessState::EXPIRING_SOON_THRESHOLD_SECONDS);
+
+        let mut expired = make_named_pack_with("freshness-c", Status::Draft, now, 1);
+        expired.expires_at = now - Duration::seconds(1);
+
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &fresh, DEFAULT_MAX_PACK_BYTES).unwrap();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &expiring, DEFAULT_MAX_PACK_BYTES)
+            .unwrap();
+        JsonStorageAdapter::write_pack_atomic(dir.path(), &expired, DEFAULT_MAX_PACK_BYTES)
+            .unwrap();
+
+        let default_list = adapter.list_packs(ListFilter::default()).await.unwrap();
+        let default_ids = default_list
+            .iter()
+            .map(|pack| pack.id.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert!(default_ids.contains(&fresh.id.as_str().to_string()));
+        assert!(default_ids.contains(&expiring.id.as_str().to_string()));
+        assert!(
+            !default_ids.contains(&expired.id.as_str().to_string()),
+            "default list must stay stale-safe and hide expired packs"
+        );
+
+        let expired_only = adapter
+            .list_packs(ListFilter {
+                freshness: Some(FreshnessState::Expired),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(expired_only.len(), 1, "only expired should match");
+        assert_eq!(expired_only[0].id, expired.id);
+
+        let expiring_only = adapter
+            .list_packs(ListFilter {
+                freshness: Some(FreshnessState::ExpiringSoon),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(expiring_only.len(), 1, "only expiring_soon should match");
+        assert_eq!(expiring_only[0].id, expiring.id);
     }
 
     #[tokio::test]
