@@ -226,6 +226,53 @@ If finalize validation fails, the error is returned as `finalize_validation` wit
 
 Draft workflow remains flexible: these checks are enforced only on finalize transition.
 
+### Release notes / migration examples (#58-#62)
+
+Use this quick map when upgrading clients from pre-#58 behavior.
+
+1) **#58 freshness-state filters + stale-safe defaults**
+- Before: list/get consumers often had to infer staleness manually.
+- After:
+  - `input/output list` default hides expired packs (stale-safe),
+  - `freshness=expired` explicitly surfaces stale packs,
+  - stable metadata fields are present: `freshness_state`, `expires_at`, `ttl_remaining`.
+- Example:
+  - default list: `{ "action":"list" }` (expired hidden),
+  - explicit stale path: `{ "action":"list", "freshness":"expired" }`.
+
+2) **#59 deterministic `get(name=...)` resolution**
+- Before: name-based reads could be ambiguous without actionable routing context.
+- After:
+  - deterministic priority (`finalized` > latest `updated_at` > highest `revision`),
+  - fail-closed ambiguity with `code=ambiguous` and `details.candidate_ids`,
+  - success LEGEND includes `selected_by`, `selected_revision`, `selected_status`.
+
+3) **#60 fail-closed finalize checklist**
+- Before: finalize readiness could be under-specified in operator flows.
+- After:
+  - finalize requires `scope`, `findings`, `qa.verdict`,
+  - stale/broken refs block finalize,
+  - machine-readable `finalize_validation` details include
+    `missing_sections`, `missing_fields`, `invalid_refs`.
+
+4) **#61 compact handoff-first default output**
+- Before: `output get` default often returned full heavy markdown for routing decisions.
+- After:
+  - default `output get` is bounded compact handoff (`mode=compact`, `limit=6`),
+  - compact provides objective/scope/verdict/risks/gaps/deep-nav hints,
+  - reviewer drill-down stays available via `mode=full`.
+
+5) **#62 actionable revision conflict diagnostics**
+- Before: conflict details were minimal (expected vs actual only).
+- After:
+  - `revision_conflict` details now include
+    `expected_revision`, `current_revision` (`actual_revision` alias),
+    `last_updated_at`, bounded `changed_section_keys`, `guidance`.
+- Retry pattern:
+  1. `input get` latest pack,
+  2. merge intent against changed sections,
+  3. retry with fresh `expected_revision`.
+
 ---
 
 ## CI and coverage policy (maintainers)
@@ -556,6 +603,53 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 - `invalid_refs` (section/ref/path/line range/reason)
 
 Черновой workflow остаётся гибким: эти проверки применяются только при переходе в finalized.
+
+### Release notes / migration-примеры (#58-#62)
+
+Краткая карта миграции для клиентов, которые обновляются с поведения до #58.
+
+1) **#58 freshness-state фильтры + stale-safe дефолты**
+- До: клиентам часто приходилось вручную вычислять «просроченность» пакетов.
+- После:
+  - `input/output list` по умолчанию скрывают expired-пакеты (stale-safe),
+  - `freshness=expired` явно показывает stale-пакеты,
+  - стабильные поля свежести: `freshness_state`, `expires_at`, `ttl_remaining`.
+- Пример:
+  - дефолтный список: `{ "action":"list" }` (expired скрыты),
+  - явный stale-path: `{ "action":"list", "freshness":"expired" }`.
+
+2) **#59 детерминированное `get(name=...)`**
+- До: выбор по имени мог быть неоднозначным без маршрутизирующих подсказок.
+- После:
+  - детерминированный приоритет (`finalized` > свежий `updated_at` > высокий `revision`),
+  - fail-closed неоднозначность: `code=ambiguous` + `details.candidate_ids`,
+  - в успешном LEGEND: `selected_by`, `selected_revision`, `selected_status`.
+
+3) **#60 fail-closed finalize checklist**
+- До: критерии готовности к finalize могли трактоваться неоднозначно.
+- После:
+  - finalize требует `scope`, `findings`, `qa.verdict`,
+  - stale/broken refs блокируют finalize,
+  - `finalize_validation` возвращает
+    `missing_sections`, `missing_fields`, `invalid_refs`.
+
+4) **#61 compact handoff-first дефолтный output**
+- До: `output get` по умолчанию часто возвращал тяжёлый full markdown даже для routing.
+- После:
+  - дефолтный `output get` — bounded compact handoff (`mode=compact`, `limit=6`),
+  - compact даёт objective/scope/verdict/risks/gaps/deep-nav hints,
+  - reviewer drill-down остаётся через `mode=full`.
+
+5) **#62 диагностируемые revision-конфликты**
+- До: детали конфликта были минимальными (только expected/actual).
+- После:
+  - `revision_conflict` содержит
+    `expected_revision`, `current_revision` (`actual_revision` alias),
+    `last_updated_at`, ограниченный `changed_section_keys`, `guidance`.
+- Retry-паттерн:
+  1. перечитать пакет через `input get`,
+  2. сверить намерение с изменившимися секциями,
+  3. повторить мутацию с новым `expected_revision`.
 
 ---
 
