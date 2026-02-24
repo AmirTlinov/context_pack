@@ -26,6 +26,20 @@ pub(super) fn domain_error_response(id: Value, err: &DomainError) -> RpcEnvelope
             }),
         ),
         DomainError::InvalidState(_) => ("invalid_state", "invalid_state", Value::Null),
+        DomainError::FinalizeValidation {
+            missing_sections,
+            missing_fields,
+            invalid_refs,
+            ..
+        } => (
+            "invalid_state",
+            "finalize_validation",
+            json!({
+                "missing_sections": missing_sections,
+                "missing_fields": missing_fields,
+                "invalid_refs": invalid_refs,
+            }),
+        ),
         DomainError::StaleRef(_) => ("stale_ref", "stale_ref", Value::Null),
         DomainError::Io(_) => ("io_error", "io_error", Value::Null),
         DomainError::Deserialize(_) => ("deserialize_error", "deserialize_error", Value::Null),

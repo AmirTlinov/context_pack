@@ -115,15 +115,7 @@ impl Pack {
         }
         match (self.status, status) {
             (Status::Draft, Status::Finalized) => {
-                let has_content = self
-                    .sections
-                    .iter()
-                    .any(|s| !s.refs.is_empty() || !s.diagrams.is_empty());
-                if !has_content {
-                    return Err(DomainError::InvalidState(
-                        "cannot finalize a pack without refs or diagrams".into(),
-                    ));
-                }
+                self.validate_finalize_gate()?;
                 self.status = status;
                 self.touch();
                 Ok(())
@@ -137,6 +129,59 @@ impl Pack {
                 "unsupported status transition".into(),
             )),
         }
+    }
+
+    pub fn validate_finalize_gate(&self) -> Result<()> {
+        let scope = self.find_section("scope");
+        let findings = self.find_section("findings");
+        let qa = self.find_section("qa");
+
+        let mut missing_sections = Vec::new();
+        if scope.is_none() {
+            missing_sections.push("scope".to_string());
+        }
+        if findings.is_none() {
+            missing_sections.push("findings".to_string());
+        }
+        if qa.is_none() {
+            missing_sections.push("qa".to_string());
+        }
+
+        let mut missing_fields = Vec::new();
+        if let Some(scope_section) = scope {
+            if !section_has_substance(scope_section) {
+                missing_fields.push("scope.content".to_string());
+            }
+        }
+        if let Some(findings_section) = findings {
+            if !section_has_substance(findings_section) {
+                missing_fields.push("findings.content".to_string());
+            }
+        }
+        if let Some(qa_section) = qa {
+            if !section_contains_verdict(qa_section) {
+                missing_fields.push("qa.verdict".to_string());
+            }
+        }
+
+        if missing_sections.is_empty() && missing_fields.is_empty() {
+            return Ok(());
+        }
+
+        let mut message_parts = Vec::new();
+        if !missing_sections.is_empty() {
+            message_parts.push(format!("missing sections: {}", missing_sections.join(", ")));
+        }
+        if !missing_fields.is_empty() {
+            message_parts.push(format!("missing fields: {}", missing_fields.join(", ")));
+        }
+
+        Err(DomainError::FinalizeValidation {
+            message: message_parts.join("; "),
+            missing_sections,
+            missing_fields,
+            invalid_refs: Vec::new(),
+        })
     }
 
     pub fn set_ttl_from_now(&mut self, minutes: u64, now: DateTime<Utc>) -> Result<()> {
@@ -354,6 +399,12 @@ impl Pack {
         map
     }
 
+    fn find_section(&self, key: &str) -> Option<&Section> {
+        self.sections
+            .iter()
+            .find(|section| section.key.as_str() == key)
+    }
+
     // ── schema migration ──────────────────────────────────────────────────────
 
     pub fn migrate_schema(self) -> Result<Self> {
@@ -403,6 +454,36 @@ fn human_ttl(seconds: i64) -> String {
     format!("{}d", days)
 }
 
+fn section_has_substance(section: &Section) -> bool {
+    section
+        .description
+        .as_deref()
+        .map(|description| !description.trim().is_empty())
+        .unwrap_or(false)
+        || !section.refs.is_empty()
+        || !section.diagrams.is_empty()
+}
+
+fn section_contains_verdict(section: &Section) -> bool {
+    text_contains_verdict(Some(section.title.as_str()))
+        || text_contains_verdict(section.description.as_deref())
+        || section.refs.iter().any(|code_ref| {
+            text_contains_verdict(code_ref.title.as_deref())
+                || text_contains_verdict(code_ref.why.as_deref())
+        })
+        || section.diagrams.iter().any(|diagram| {
+            text_contains_verdict(Some(diagram.title.as_str()))
+                || text_contains_verdict(diagram.why.as_deref())
+        })
+}
+
+fn text_contains_verdict(text: Option<&str>) -> bool {
+    let Some(raw) = text else {
+        return false;
+    };
+    raw.to_ascii_lowercase().contains("verdict")
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -414,24 +495,46 @@ mod tests {
         Pack::new(PackId::new(), Some(PackName::new("test-pack").unwrap()))
     }
 
-    #[test]
-    fn test_finalized_pack_is_immutable() {
-        let mut pack = make_pack();
-        let sk = SectionKey::new("sec-one").unwrap();
-        pack.upsert_section(sk.clone(), "Section One".into(), None, None)
-            .unwrap();
+    fn seed_finalize_minimum(pack: &mut Pack) {
+        let scope_key = SectionKey::new("scope").unwrap();
+        pack.upsert_section(
+            scope_key,
+            "Scope".into(),
+            Some("What this pack covers".into()),
+            None,
+        )
+        .unwrap();
+
+        let findings_key = SectionKey::new("findings").unwrap();
+        pack.upsert_section(
+            findings_key.clone(),
+            "Findings".into(),
+            Some("Main findings".into()),
+            None,
+        )
+        .unwrap();
         pack.upsert_ref(
-            &sk,
+            &findings_key,
             RefSpec {
-                key: RefKey::new("ref-one").unwrap(),
+                key: RefKey::new("finding-ref").unwrap(),
                 path: RelativePath::new("src/main.rs").unwrap(),
-                lines: LineRange::new(1, 10).unwrap(),
-                title: None,
-                why: None,
+                lines: LineRange::new(1, 1).unwrap(),
+                title: Some("finding".into()),
+                why: Some("supports finding".into()),
                 group: None,
             },
         )
         .unwrap();
+
+        let qa_key = SectionKey::new("qa").unwrap();
+        pack.upsert_section(qa_key, "QA".into(), Some("verdict: pass".into()), None)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_finalized_pack_is_immutable() {
+        let mut pack = make_pack();
+        seed_finalize_minimum(&mut pack);
         pack.set_status(Status::Finalized).unwrap();
 
         let res = pack.upsert_section(SectionKey::new("sec-two").unwrap(), "X".into(), None, None);
@@ -446,15 +549,99 @@ mod tests {
     fn test_cannot_finalize_empty_pack() {
         let mut pack = make_pack();
         let res = pack.set_status(Status::Finalized);
-        assert!(res.is_err());
+        assert!(
+            matches!(
+                res,
+                Err(DomainError::FinalizeValidation {
+                    missing_sections,
+                    ..
+                }) if missing_sections == vec![
+                    "scope".to_string(),
+                    "findings".to_string(),
+                    "qa".to_string()
+                ]
+            ),
+            "empty pack finalize should fail with missing sections details"
+        );
     }
 
     #[test]
     fn test_cannot_finalize_with_only_empty_section() {
         let mut pack = make_pack();
-        pack.upsert_section(SectionKey::new("sec-one").unwrap(), "S".into(), None, None)
+        pack.upsert_section(
+            SectionKey::new("scope").unwrap(),
+            "Scope".into(),
+            Some("scope text".into()),
+            None,
+        )
+        .unwrap();
+        let err = pack
+            .set_status(Status::Finalized)
+            .expect_err("finalize should fail without findings/qa");
+        assert!(
+            matches!(
+                err,
+                DomainError::FinalizeValidation {
+                    missing_sections,
+                    ..
+                } if missing_sections == vec!["findings".to_string(), "qa".to_string()]
+            ),
+            "missing findings/qa should be reported explicitly"
+        );
+    }
+
+    #[test]
+    fn test_cannot_finalize_without_qa_verdict() {
+        let mut pack = make_pack();
+        pack.upsert_section(
+            SectionKey::new("scope").unwrap(),
+            "Scope".into(),
+            Some("scope text".into()),
+            None,
+        )
+        .unwrap();
+        let findings_key = SectionKey::new("findings").unwrap();
+        pack.upsert_section(
+            findings_key.clone(),
+            "Findings".into(),
+            Some("main findings".into()),
+            None,
+        )
+        .unwrap();
+        pack.upsert_ref(
+            &findings_key,
+            RefSpec {
+                key: RefKey::new("finding-ref").unwrap(),
+                path: RelativePath::new("src/main.rs").unwrap(),
+                lines: LineRange::new(1, 1).unwrap(),
+                title: None,
+                why: None,
+                group: None,
+            },
+        )
+        .unwrap();
+        pack.upsert_section(SectionKey::new("qa").unwrap(), "QA".into(), None, None)
             .unwrap();
-        assert!(pack.set_status(Status::Finalized).is_err());
+
+        let err = pack
+            .set_status(Status::Finalized)
+            .expect_err("finalize should fail without qa verdict");
+        assert!(
+            matches!(
+                err,
+                DomainError::FinalizeValidation { missing_fields, .. }
+                if missing_fields == vec!["qa.verdict".to_string()]
+            ),
+            "missing qa verdict should be reported in missing_fields"
+        );
+    }
+
+    #[test]
+    fn test_finalize_minimal_pack_succeeds() {
+        let mut pack = make_pack();
+        seed_finalize_minimum(&mut pack);
+        pack.set_status(Status::Finalized).unwrap();
+        assert_eq!(pack.status, Status::Finalized);
     }
 
     #[test]

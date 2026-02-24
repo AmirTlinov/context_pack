@@ -1,4 +1,15 @@
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FinalizeRefIssue {
+    pub section_key: String,
+    pub ref_key: String,
+    pub path: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub reason: String,
+}
 
 #[derive(Debug, Error)]
 pub enum DomainError {
@@ -25,6 +36,14 @@ pub enum DomainError {
 
     #[error("invalid state: {0}")]
     InvalidState(String),
+
+    #[error("finalize validation failed: {message}")]
+    FinalizeValidation {
+        message: String,
+        missing_sections: Vec<String>,
+        missing_fields: Vec<String>,
+        invalid_refs: Vec<FinalizeRefIssue>,
+    },
 
     #[error("stale ref: {0}")]
     StaleRef(String),

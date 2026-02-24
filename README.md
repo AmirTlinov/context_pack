@@ -211,6 +211,21 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 - `match` invalid regex returns validation error (`invalid_data`) with explicit reason.
 - `output` is always markdown (`format` is rejected).
 
+### Finalize checklist (fail-closed)
+
+Before setting `status=finalized`, ensure:
+- `scope` section exists and has substance (description and/or refs/diagrams).
+- `findings` section exists and has substance (description and/or refs/diagrams).
+- `qa` section exists and contains a `verdict` field (for example: `verdict: pass`).
+- all refs are resolvable (no stale/broken anchors).
+
+If finalize validation fails, the error is returned as `finalize_validation` with structured details:
+- `missing_sections`
+- `missing_fields`
+- `invalid_refs` (section/ref/path/line range/reason)
+
+Draft workflow remains flexible: these checks are enforced only on finalize transition.
+
 ---
 
 ## CI and coverage policy (maintainers)
@@ -516,6 +531,21 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 - Cursor fail-closed: при stale/mismatch возвращается `invalid_data` с семантикой `invalid_cursor` в message.
 - Невалидный regex в `match` возвращает validation error (`invalid_data`) с явной причиной.
 - `output` всегда markdown (`format` отклоняется).
+
+### Finalize checklist (fail-closed)
+
+Перед установкой `status=finalized` убедитесь:
+- есть секция `scope` с содержимым (description и/или refs/diagrams);
+- есть секция `findings` с содержимым (description и/или refs/diagrams);
+- есть секция `qa`, где присутствует поле `verdict` (например: `verdict: pass`);
+- все refs резолвятся (нет stale/broken anchors).
+
+Если валидация финализации не проходит, возвращается `finalize_validation` со структурированными деталями:
+- `missing_sections`
+- `missing_fields`
+- `invalid_refs` (section/ref/path/line range/reason)
+
+Черновой workflow остаётся гибким: эти проверки применяются только при переходе в finalized.
 
 ---
 
