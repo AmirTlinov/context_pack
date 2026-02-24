@@ -179,10 +179,11 @@ CONTEXT_PACK_EXPIRED_GRACE_SECONDS = "900"
 ## Tool contract (short)
 
 - Pack id format: `pk_[a-z2-7]{8}`.
-- `input` actions: `list`, `create`, `get`, `upsert_section`, `delete_section`, `upsert_ref`, `delete_ref`, `upsert_diagram`, `set_meta`, `set_status`, `touch_ttl`, `delete_pack`.
-- All mutating actions except `create` and `delete_pack` require `expected_revision`.
-- `create` requires `ttl_minutes`.
-- `touch_ttl` accepts exactly one: `ttl_minutes` or `extend_minutes`.
+- `input` actions: `list`, `get`, `write`, `ttl`, `delete`.
+- `input write` is **document-only** full-replace snapshot (`document` object); legacy `op` and granular mutation fields are rejected with guidance.
+- Update writes require `id|name` + `expected_revision`; create writes omit both and allocate a new pack id.
+- `validate_only=true` runs the same snapshot/finalize validations but does not persist changes.
+- `ttl` accepts exactly one: `ttl_minutes` or `extend_minutes`.
 - `output` actions stay `list|read` (no extra tool/action sprawl).
 - `input list` and `output list` accept optional `freshness` filter:
   - `fresh`
@@ -611,10 +612,11 @@ CONTEXT_PACK_MAX_SOURCE_BYTES = "2097152"
 ## Краткий контракт инструментов
 
 - Формат id: `pk_[a-z2-7]{8}`.
-- `input` actions: `list`, `create`, `get`, `upsert_section`, `delete_section`, `upsert_ref`, `delete_ref`, `upsert_diagram`, `set_meta`, `set_status`, `touch_ttl`, `delete_pack`.
-- Все мутации, кроме `create` и `delete_pack`, требуют `expected_revision`.
-- `create` требует `ttl_minutes`.
-- `touch_ttl` принимает строго одно: `ttl_minutes` или `extend_minutes`.
+- `input` actions: `list`, `get`, `write`, `ttl`, `delete`.
+- `input write` работает только через **full-replace `document`**; legacy `op` и granular-поля мутаций отклоняются с подсказкой миграции.
+- Update-write требует `id|name` + `expected_revision`; create-write выполняется без них и создаёт новый pack id.
+- `validate_only=true` запускает те же проверки snapshot/finalize, но без persistence.
+- `ttl` принимает строго одно: `ttl_minutes` или `extend_minutes`.
 - `output` остаётся с actions только `list|read` (без разрастания API).
 - `input list` и `output list` принимают опциональный фильтр `freshness`:
   - `fresh`

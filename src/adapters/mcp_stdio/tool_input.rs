@@ -1,16 +1,20 @@
 use serde_json::{json, Value};
 
 use crate::app::input_usecases::{
-    InputUseCases, TouchTtlMode, UpsertDiagramRequest, UpsertRefRequest,
+    InputUseCases, SnapshotDiagram, SnapshotDocument, SnapshotRef, SnapshotSection, TouchTtlMode,
+    WriteSnapshotRequest,
 };
 use crate::app::ports::FreshnessState;
 use crate::domain::errors::DomainError;
 use crate::domain::models::Pack;
+use crate::domain::types::Status;
 
 use super::{
-    freshness_opt, pack_summary, req_identifier, req_status, req_str, req_u64, req_usize,
-    status_opt, str_opt, tags_opt, tool_success, u64_opt, usize_opt,
+    freshness_opt, pack_summary, req_identifier, req_u64, status_opt, str_opt, tool_success,
+    u64_opt, usize_opt,
 };
+
+const INPUT_ALLOWED_ACTIONS: [&str; 5] = ["list", "get", "write", "ttl", "delete"];
 
 pub(super) async fn handle_input_tool(
     args: &Value,
@@ -87,12 +91,12 @@ pub(super) async fn handle_input_tool(
             tool_success("ttl", serde_json::to_value(pack)?)
         }
         "delete" => {
-            let id = req_pack_identifier(args, "input", "delete")?;
-            let deleted = uc.delete_pack_file(&id).await?;
+            let ident = req_pack_identifier(args, "input", "delete")?;
+            let deleted = uc.delete_pack_file(&ident).await?;
             tool_success(
                 "delete",
                 serde_json::json!({
-                    "id": id,
+                    "id": ident,
                     "deleted": deleted
                 }),
             )
@@ -102,136 +106,285 @@ pub(super) async fn handle_input_tool(
 }
 
 async fn handle_write_action(args: &Value, uc: &InputUseCases) -> Result<Value, DomainError> {
-    let op = req_write_action(args)?;
-    match op.as_str() {
-        "create" => {
-            let name = str_opt(args, "name");
-            let title = str_opt(args, "title");
-            let brief = str_opt(args, "brief");
-            let tags = tags_opt(args)?;
-            let ttl_minutes = req_u64_required(args, "ttl_minutes", "input/write")?;
-            let pack = uc
-                .create_with_tags_ttl(name, title, brief, tags, ttl_minutes)
-                .await?;
-            tool_success("write", serde_json::to_value(pack)?)
-        }
-        "upsert_section" => {
-            reject_legacy_alias(args, "write upsert_section", "title", "section_title")?;
-            reject_legacy_alias(args, "write upsert_section", "description", "section_description")?;
-            let ident = req_pack_identifier(args, "input/write", "upsert_section")?;
-            let expected_revision = req_expected_revision(args)?;
-            let section_key = req_str(args, "section_key")?;
-            let title = req_str(args, "section_title")?;
-            let description = str_opt(args, "section_description");
-            let order = usize_opt(args, "section_order")?;
-            let pack = uc
-                .upsert_section_checked(
-                    &ident,
-                    &section_key,
-                    title,
-                    description,
-                    order,
-                    expected_revision,
-                )
-                .await?;
-            tool_success("write", serde_json::to_value(pack)?)
-        }
-        "delete_section" => {
-            let ident = req_pack_identifier(args, "input/write", "delete_section")?;
-            let expected_revision = req_expected_revision(args)?;
-            let section_key = req_str(args, "section_key")?;
-            let pack = uc
-                .delete_section_checked(&ident, &section_key, expected_revision)
-                .await?;
-            tool_success("write", serde_json::to_value(pack)?)
-        }
-        "upsert_ref" => {
-            reject_legacy_alias(args, "write upsert_ref", "title", "ref_title")?;
-            reject_legacy_alias(args, "write upsert_ref", "why", "ref_why")?;
-            let ident = req_pack_identifier(args, "input/write", "upsert_ref")?;
-            let expected_revision = req_expected_revision(args)?;
-            let req = UpsertRefRequest {
-                section_key: req_str(args, "section_key")?,
-                ref_key: req_str(args, "ref_key")?,
-                path: req_str(args, "path")?,
-                line_start: req_usize(args, "line_start")?,
-                line_end: req_usize(args, "line_end")?,
-                title: str_opt(args, "ref_title"),
-                why: str_opt(args, "ref_why"),
-                group: str_opt(args, "group"),
-            };
-            let pack = uc
-                .upsert_ref_checked(&ident, req, expected_revision)
-                .await?;
-            tool_success("write", serde_json::to_value(pack)?)
-        }
-        "delete_ref" => {
-            let ident = req_pack_identifier(args, "input/write", "delete_ref")?;
-            let expected_revision = req_expected_revision(args)?;
-            let section_key = req_str(args, "section_key")?;
-            let ref_key = req_str(args, "ref_key")?;
-            let pack = uc
-                .delete_ref_checked(&ident, &section_key, &ref_key, expected_revision)
-                .await?;
-            tool_success("write", serde_json::to_value(pack)?)
-        }
-        "upsert_diagram" => {
-            reject_legacy_alias(args, "write upsert_diagram", "why", "diagram_why")?;
-            let ident = req_pack_identifier(args, "input/write", "upsert_diagram")?;
-            let expected_revision = req_expected_revision(args)?;
-            let request = UpsertDiagramRequest {
-                section_key: req_str(args, "section_key")?,
-                diagram_key: req_str(args, "diagram_key")?,
-                title: req_str(args, "title")?,
-                mermaid: req_str(args, "mermaid")?,
-                why: str_opt(args, "diagram_why"),
-            };
-            let pack = uc
-                .upsert_diagram_checked(&ident, request, expected_revision)
-                .await?;
-            tool_success("write", serde_json::to_value(pack)?)
-        }
-        "set_meta" => {
-            let ident = req_pack_identifier(args, "input/write", "set_meta")?;
-            let expected_revision = req_expected_revision(args)?;
-            let title = str_opt(args, "title");
-            let brief = str_opt(args, "brief");
-            let tags = tags_opt(args)?;
-            let pack = uc
-                .set_meta_checked(&ident, title, brief, tags, expected_revision)
-                .await?;
-            tool_success("write", serde_json::to_value(pack)?)
-        }
-        "set_status" => {
-            let ident = req_pack_identifier(args, "input/write", "set_status")?;
-            let expected_revision = req_expected_revision(args)?;
-            let status = req_status(args, "status")?;
-            let pack = uc
-                .set_status_checked(&ident, status, expected_revision)
-                .await?;
-            tool_success("write", serde_json::to_value(pack)?)
-        }
-        _ => Err(DomainError::DetailedInvalidData {
+    reject_legacy_write_contract(args)?;
+    let request = parse_write_snapshot_request(args)?;
+    let pack = uc.write_snapshot(request).await?;
+    tool_success("write", serde_json::to_value(pack)?)
+}
+
+fn reject_legacy_write_contract(args: &Value) -> Result<(), DomainError> {
+    reject_legacy_write_field(args, "op", "document")?;
+    reject_legacy_write_field(args, "snapshot", "document")?;
+
+    const LEGACY_MUTATION_FIELDS: [&str; 18] = [
+        "section_key",
+        "section_title",
+        "section_description",
+        "section_order",
+        "ref_key",
+        "ref_title",
+        "ref_why",
+        "path",
+        "line_start",
+        "line_end",
+        "group",
+        "diagram_key",
+        "mermaid",
+        "diagram_why",
+        "title",
+        "brief",
+        "tags",
+        "ttl_minutes",
+    ];
+
+    for field in LEGACY_MUTATION_FIELDS {
+        reject_legacy_write_field(args, field, "document")?;
+    }
+
+    Ok(())
+}
+
+fn reject_legacy_write_field(
+    args: &Value,
+    legacy_field: &str,
+    supported_field: &str,
+) -> Result<(), DomainError> {
+    if args.get(legacy_field).is_some() {
+        return Err(DomainError::DetailedInvalidData {
             message: format!(
-                "unknown write op '{}'; allowed ops: create, upsert_section, delete_section, upsert_ref, delete_ref, upsert_diagram, set_meta, set_status",
-                op
+                "'{}' is not supported for input write in v3; use '{}'",
+                legacy_field, supported_field
             ),
             details: json!({
+                "tool": "input",
                 "action": "write",
-                "requested_op": op,
-                "allowed_ops": [
-                    "create",
-                    "upsert_section",
-                    "delete_section",
-                    "upsert_ref",
-                    "delete_ref",
-                    "upsert_diagram",
-                    "set_meta",
-                    "set_status"
+                "unsupported_field": legacy_field,
+                "supported_field": supported_field,
+                "contract": "document_full_replace",
+            }),
+        });
+    }
+    Ok(())
+}
+
+fn parse_write_snapshot_request(args: &Value) -> Result<WriteSnapshotRequest, DomainError> {
+    let document = args
+        .get("document")
+        .ok_or_else(|| DomainError::DetailedInvalidData {
+            message: "input write requires 'document'".into(),
+            details: json!({
+                "tool": "input",
+                "action": "write",
+                "required_fields": ["document"],
+            }),
+        })?;
+    let document_obj = document
+        .as_object()
+        .ok_or_else(|| DomainError::DetailedInvalidData {
+            message: "'document' must be an object".into(),
+            details: json!({
+                "tool": "input",
+                "action": "write",
+                "field": "document",
+                "required_type": "object",
+            }),
+        })?;
+
+    let identifier = str_opt(args, "id")
+        .or_else(|| str_opt(args, "name"))
+        .or_else(|| str_opt(args, "identifier"));
+    let expected_revision = u64_opt(args, "expected_revision")?;
+
+    if identifier.is_some() && expected_revision.is_none() {
+        return Err(DomainError::DetailedInvalidData {
+            message: "write update requires expected_revision".into(),
+            details: json!({
+                "tool": "input",
+                "action": "write",
+                "required_fields": ["expected_revision"],
+                "guidance": [
+                    "fetch latest revision with input.get before mutating"
                 ],
             }),
-        }),
+        });
     }
+
+    if identifier.is_none() && expected_revision.is_some() {
+        return Err(DomainError::DetailedInvalidData {
+            message: "expected_revision is only valid with id/name update writes".into(),
+            details: json!({
+                "tool": "input",
+                "action": "write",
+                "required_fields": ["id", "name"],
+                "unsupported_field": "expected_revision",
+            }),
+        });
+    }
+
+    let sections = document_obj
+        .get("sections")
+        .and_then(Value::as_array)
+        .ok_or_else(|| DomainError::DetailedInvalidData {
+            message: "document.sections is required".into(),
+            details: json!({
+                "tool": "input",
+                "action": "write",
+                "required_fields": ["document.sections"],
+            }),
+        })?;
+
+    let mut parsed_sections = Vec::with_capacity(sections.len());
+    for section in sections {
+        let section_obj = section
+            .as_object()
+            .ok_or_else(|| DomainError::InvalidData("section must be an object".into()))?;
+        let refs = parse_document_refs(section_obj.get("refs"))?;
+        let diagrams = parse_document_diagrams(section_obj.get("diagrams"))?;
+        parsed_sections.push(SnapshotSection {
+            key: req_document_str(section_obj, "key")?,
+            title: req_document_str(section_obj, "title")?,
+            description: document_opt_str(section_obj, "description"),
+            refs,
+            diagrams,
+        });
+    }
+
+    let tags = parse_document_tags(document_obj.get("tags"))?;
+    let ttl_minutes = document_obj
+        .get("ttl_minutes")
+        .map(document_u64)
+        .transpose()?;
+
+    Ok(WriteSnapshotRequest {
+        identifier,
+        expected_revision,
+        validate_only: args
+            .get("validate_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        document: SnapshotDocument {
+            name: document_opt_str(document_obj, "name"),
+            title: document_opt_str(document_obj, "title"),
+            brief: document_opt_str(document_obj, "brief"),
+            tags,
+            ttl_minutes,
+            status: parse_document_status(document_obj.get("status"))?,
+            sections: parsed_sections,
+        },
+    })
+}
+
+fn parse_document_status(value: Option<&Value>) -> Result<Status, DomainError> {
+    match value {
+        None => Ok(Status::Draft),
+        Some(raw) => {
+            let text = raw.as_str().ok_or_else(|| {
+                DomainError::InvalidData("document.status must be a string".into())
+            })?;
+            text.parse::<Status>()
+        }
+    }
+}
+
+fn parse_document_tags(raw: Option<&Value>) -> Result<Vec<String>, DomainError> {
+    let Some(raw_tags) = raw else {
+        return Ok(Vec::new());
+    };
+
+    let tags = raw_tags
+        .as_array()
+        .ok_or_else(|| DomainError::InvalidData("document.tags must be an array".into()))?;
+    let mut parsed = Vec::with_capacity(tags.len());
+    for tag in tags {
+        let value = tag.as_str().ok_or_else(|| {
+            DomainError::InvalidData("document.tags entries must be strings".into())
+        })?;
+        parsed.push(value.to_string());
+    }
+    Ok(parsed)
+}
+
+fn parse_document_refs(raw: Option<&Value>) -> Result<Vec<SnapshotRef>, DomainError> {
+    let Some(raw_refs) = raw else {
+        return Ok(Vec::new());
+    };
+
+    let refs = raw_refs
+        .as_array()
+        .ok_or_else(|| DomainError::InvalidData("section.refs must be an array".into()))?;
+    let mut out = Vec::with_capacity(refs.len());
+    for value in refs {
+        let obj = value
+            .as_object()
+            .ok_or_else(|| DomainError::InvalidData("ref must be an object".into()))?;
+        out.push(SnapshotRef {
+            key: req_document_str(obj, "key")?,
+            path: req_document_str(obj, "path")?,
+            line_start: req_document_usize(obj, "line_start")?,
+            line_end: req_document_usize(obj, "line_end")?,
+            title: document_opt_str(obj, "title"),
+            why: document_opt_str(obj, "why"),
+            group: document_opt_str(obj, "group"),
+        });
+    }
+    Ok(out)
+}
+
+fn parse_document_diagrams(raw: Option<&Value>) -> Result<Vec<SnapshotDiagram>, DomainError> {
+    let Some(raw_diagrams) = raw else {
+        return Ok(Vec::new());
+    };
+
+    let diagrams = raw_diagrams
+        .as_array()
+        .ok_or_else(|| DomainError::InvalidData("section.diagrams must be an array".into()))?;
+    let mut out = Vec::with_capacity(diagrams.len());
+    for value in diagrams {
+        let obj = value
+            .as_object()
+            .ok_or_else(|| DomainError::InvalidData("diagram must be an object".into()))?;
+        out.push(SnapshotDiagram {
+            key: req_document_str(obj, "key")?,
+            title: req_document_str(obj, "title")?,
+            mermaid: req_document_str(obj, "mermaid")?,
+            why: document_opt_str(obj, "why"),
+        });
+    }
+    Ok(out)
+}
+
+fn req_document_str(
+    obj: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<String, DomainError> {
+    obj.get(key)
+        .and_then(Value::as_str)
+        .map(|value| value.to_string())
+        .ok_or_else(|| DomainError::InvalidData(format!("document.{} is required", key)))
+}
+
+fn req_document_usize(
+    obj: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<usize, DomainError> {
+    let value = obj
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| DomainError::InvalidData(format!("document.{} is required", key)))?;
+    usize::try_from(value)
+        .map_err(|_| DomainError::InvalidData(format!("document.{} is out of range", key)))
+}
+
+fn document_u64(value: &Value) -> Result<u64, DomainError> {
+    value
+        .as_u64()
+        .ok_or_else(|| DomainError::InvalidData("document.ttl_minutes must be an integer".into()))
+}
+
+fn document_opt_str(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    obj.get(key)
+        .and_then(Value::as_str)
+        .map(|value| value.to_string())
 }
 
 fn req_pack_identifier(args: &Value, tool: &str, action: &str) -> Result<String, DomainError> {
@@ -266,60 +419,23 @@ fn req_expected_revision(args: &Value) -> Result<u64, DomainError> {
     })
 }
 
-fn req_u64_required(args: &Value, key: &str, tool_action: &str) -> Result<u64, DomainError> {
-    req_u64(args, key).map_err(|err| match err {
-        DomainError::InvalidData(_) => DomainError::DetailedInvalidData {
-            message: format!("{} requires '{}'", tool_action, key),
-            details: json!({
-                "tool": "input",
-                "action": "write",
-                "required_fields": [key],
-            }),
-        },
-        other => other,
-    })
-}
-
-fn req_write_action(args: &Value) -> Result<String, DomainError> {
-    req_str(args, "op").map_err(|err| match err {
-        DomainError::InvalidData(_) => DomainError::DetailedInvalidData {
-            message: "write action requires 'op'".into(),
-            details: json!({
-                "tool": "input",
-                "action": "write",
-                "required_fields": ["op"],
-                "allowed_ops": [
-                    "create",
-                    "upsert_section",
-                    "delete_section",
-                    "upsert_ref",
-                    "delete_ref",
-                    "upsert_diagram",
-                    "set_meta",
-                    "set_status"
-                ]
-            }),
-        },
-        other => other,
-    })
-}
-
 fn unsupported_input_action(action: &str) -> DomainError {
     match action {
         "create" | "upsert_section" | "delete_section" | "upsert_ref" | "delete_ref"
         | "upsert_diagram" | "set_meta" | "set_status" => DomainError::DetailedInvalidData {
             message: format!(
-                "input action '{}' is not supported in v3; use action='write' with op='{}'",
-                action, action
+                "input action '{}' is not supported in v3; use action='write' with document",
+                action
             ),
             details: json!({
                 "tool": "input",
                 "action": "unsupported",
                 "requested_action": action,
-                "allowed_actions": ["list", "get", "write", "ttl", "delete"],
+                "allowed_actions": INPUT_ALLOWED_ACTIONS,
                 "legacy_mapping": {
                     "action": "write",
-                    "op": action,
+                    "required_fields": ["document"],
+                    "contract": "document_full_replace",
                 },
             }),
         },
@@ -329,7 +445,7 @@ fn unsupported_input_action(action: &str) -> DomainError {
                 "tool": "input",
                 "action": "unsupported",
                 "requested_action": "touch_ttl",
-                "allowed_actions": ["list", "get", "write", "ttl", "delete"],
+                "allowed_actions": INPUT_ALLOWED_ACTIONS,
                 "legacy_mapping": { "action": "ttl" },
             }),
         },
@@ -340,7 +456,7 @@ fn unsupported_input_action(action: &str) -> DomainError {
                 "tool": "input",
                 "action": "unsupported",
                 "requested_action": "delete_pack",
-                "allowed_actions": ["list", "get", "write", "ttl", "delete"],
+                "allowed_actions": INPUT_ALLOWED_ACTIONS,
                 "legacy_mapping": { "action": "delete" },
             }),
         },
@@ -353,7 +469,7 @@ fn unsupported_input_action(action: &str) -> DomainError {
                 "tool": "input",
                 "action": "unknown",
                 "requested_action": action,
-                "allowed_actions": ["list", "get", "write", "ttl", "delete"],
+                "allowed_actions": INPUT_ALLOWED_ACTIONS,
             }),
         },
     }
@@ -386,27 +502,4 @@ fn pack_with_freshness_metadata(pack: Pack) -> Result<Value, DomainError> {
         serde_json::to_value(freshness_state)?,
     );
     Ok(payload)
-}
-
-fn reject_legacy_alias(
-    args: &Value,
-    action_context: &str,
-    legacy_key: &str,
-    canonical_key: &str,
-) -> Result<(), DomainError> {
-    if args.get(legacy_key).is_some() {
-        return Err(DomainError::DetailedInvalidData {
-            message: format!(
-                "'{}' is not supported for {} in v3; use '{}' instead",
-                legacy_key, action_context, canonical_key
-            ),
-            details: json!({
-                "tool": "input",
-                "action_context": action_context,
-                "unsupported_field": legacy_key,
-                "supported_field": canonical_key,
-            }),
-        });
-    }
-    Ok(())
 }

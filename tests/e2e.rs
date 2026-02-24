@@ -320,11 +320,17 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"create",
-                        "name":"e2e-pack",
-                        "title":"E2E pack",
-                        "brief":"E2E integration test",
-                        "ttl_minutes": 90
+                        "action":"write",
+                        "document":{
+                            "name":"e2e-pack",
+                            "title":"E2E pack",
+                            "brief":"E2E integration test",
+                            "ttl_minutes":90,
+                            "status":"draft",
+                            "sections":[
+                                {"key":"notes","title":"Notes","description":"bootstrap"}
+                            ]
+                        }
                     }
                 }
             }))
@@ -334,91 +340,7 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
             .as_str()
             .context("missing created pack id")?
             .to_string();
-        let mut revision = payload_pack_revision(&created_payload)?;
-
-        let upsert_scope = client
-            .call(json!({
-                "jsonrpc":"2.0",
-                "id":4,
-                "method":"tools/call",
-                "params":{
-                    "name":"input",
-                    "arguments":{
-                        "id": pack_id.clone(),
-                        "action":"write","op":"upsert_section",
-                        "expected_revision": revision,
-                        "section_key":"scope",
-                        "section_title":"Scope",
-                        "section_description":"Auth flow scope"
-                    }
-                }
-            }))
-            .await?;
-        revision = payload_pack_revision(&parse_tool_payload(&upsert_scope)?)?;
-
-        let upsert_findings = client
-            .call(json!({
-                "jsonrpc":"2.0",
-                "id":5,
-                "method":"tools/call",
-                "params":{
-                    "name":"input",
-                    "arguments":{
-                        "id": pack_id.clone(),
-                        "action":"write","op":"upsert_section",
-                        "expected_revision": revision,
-                        "section_key":"findings",
-                        "section_title":"Findings",
-                        "section_description":"Auth findings"
-                    }
-                }
-            }))
-            .await?;
-        revision = payload_pack_revision(&parse_tool_payload(&upsert_findings)?)?;
-
-        let upsert_ref = client
-            .call(json!({
-                "jsonrpc":"2.0",
-                "id":6,
-                "method":"tools/call",
-                "params":{
-                    "name":"input",
-                    "arguments":{
-                        "id": pack_id.clone(),
-                        "action":"write","op":"upsert_ref",
-                        "expected_revision": revision,
-                        "section_key":"findings",
-                        "ref_key":"auth_handler",
-                        "ref_title":"login handler",
-                        "ref_why":"Need actual snippet for login flow",
-                        "path":"auth.rs",
-                        "line_start":1,
-                        "line_end":3
-                    }
-                }
-            }))
-            .await?;
-        revision = payload_pack_revision(&parse_tool_payload(&upsert_ref)?)?;
-
-        let upsert_qa = client
-            .call(json!({
-                "jsonrpc":"2.0",
-                "id":7,
-                "method":"tools/call",
-                "params":{
-                    "name":"input",
-                    "arguments":{
-                        "id": pack_id.clone(),
-                        "action":"write","op":"upsert_section",
-                        "expected_revision": revision,
-                        "section_key":"qa",
-                        "section_title":"QA",
-                        "section_description":"verdict: pass"
-                    }
-                }
-            }))
-            .await?;
-        revision = payload_pack_revision(&parse_tool_payload(&upsert_qa)?)?;
+        let revision = payload_pack_revision(&created_payload)?;
 
         let finalized = client
             .call(json!({
@@ -428,16 +350,41 @@ async fn e2e_tool_call_roundtrip_with_real_stdio() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
+                        "action":"write",
                         "id": pack_id.clone(),
-                        "action":"write","op":"set_status",
                         "expected_revision": revision,
-                        "status":"finalized"
+                        "document":{
+                            "name":"e2e-pack",
+                            "title":"E2E pack",
+                            "brief":"E2E integration test",
+                            "ttl_minutes":90,
+                            "status":"finalized",
+                            "sections":[
+                                {"key":"scope","title":"Scope","description":"Auth flow scope"},
+                                {
+                                    "key":"findings",
+                                    "title":"Findings",
+                                    "description":"Auth findings",
+                                    "refs":[
+                                        {
+                                            "key":"auth_handler",
+                                            "path":"auth.rs",
+                                            "line_start":1,
+                                            "line_end":3,
+                                            "title":"login handler",
+                                            "why":"Need actual snippet for login flow"
+                                        }
+                                    ]
+                                },
+                                {"key":"qa","title":"QA","description":"verdict: pass"}
+                            ]
+                        }
                     }
                 }
             }))
             .await?;
-        revision = payload_pack_revision(&parse_tool_payload(&finalized)?)?;
-        assert!(revision >= 6);
+        let revision = payload_pack_revision(&parse_tool_payload(&finalized)?)?;
+        assert!(revision > 1);
 
         let output = client
             .call(json!({
@@ -545,9 +492,12 @@ async fn e2e_input_delete_pack_is_deterministic() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"create",
-                        "name":"delete-pack",
-                        "ttl_minutes": 60
+                        "action":"write",
+                        "document":{
+                            "name":"delete-pack",
+                            "ttl_minutes":60,
+                            "sections":[]
+                        }
                     }
                 }
             }))
@@ -741,8 +691,8 @@ async fn e2e_v3_rejects_legacy_actions_with_invalid_data() -> Result<()> {
             "write"
         );
         assert_eq!(
-            legacy_input_payload["details"]["legacy_mapping"]["op"],
-            "create"
+            legacy_input_payload["details"]["legacy_mapping"]["required_fields"],
+            json!(["document"])
         );
 
         let legacy_output = client
@@ -802,9 +752,12 @@ async fn e2e_input_rejects_missing_write_expected_revision_with_details() -> Res
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"create",
-                        "name":"missing-revision-pack",
-                        "ttl_minutes": 30
+                        "action":"write",
+                        "document":{
+                            "name":"missing-revision-pack",
+                            "ttl_minutes":30,
+                            "sections":[]
+                        }
                     }
                 }
             }))
@@ -823,9 +776,14 @@ async fn e2e_input_rejects_missing_write_expected_revision_with_details() -> Res
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"set_status",
+                        "action":"write",
                         "id":pack_id,
-                        "status":"draft"
+                        "document":{
+                            "name":"missing-revision-pack",
+                            "ttl_minutes":30,
+                            "status":"draft",
+                            "sections":[]
+                        }
                     }
                 }
             }))
@@ -870,9 +828,15 @@ async fn e2e_request_id_and_revision_conflict_contract() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"create",
-                        "name":"conflict-e2e",
-                        "ttl_minutes": 120
+                        "action":"write",
+                        "document":{
+                            "name":"conflict-e2e",
+                            "ttl_minutes":120,
+                            "status":"draft",
+                            "sections":[
+                                {"key":"sec","title":"Section"}
+                            ]
+                        }
                     }
                 }
             }))
@@ -892,11 +856,17 @@ async fn e2e_request_id_and_revision_conflict_contract() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"upsert_section",
+                        "action":"write",
                         "id": pack_id.clone(),
                         "expected_revision": stale_revision,
-                        "section_key":"sec",
-                        "section_title":"Section"
+                        "document":{
+                            "name":"conflict-e2e",
+                            "ttl_minutes":120,
+                            "status":"draft",
+                            "sections":[
+                                {"key":"sec","title":"Section updated"}
+                            ]
+                        }
                     }
                 }
             }))
@@ -911,10 +881,18 @@ async fn e2e_request_id_and_revision_conflict_contract() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"set_meta",
+                        "action":"write",
                         "id": pack_id.clone(),
                         "expected_revision": stale_revision,
-                        "title":"new title"
+                        "document":{
+                            "name":"conflict-e2e",
+                            "title":"new title",
+                            "ttl_minutes":120,
+                            "status":"draft",
+                            "sections":[
+                                {"key":"sec","title":"Section updated"}
+                            ]
+                        }
                     }
                 }
             }))
@@ -991,10 +969,18 @@ async fn e2e_request_id_and_revision_conflict_contract() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"set_meta",
+                        "action":"write",
                         "id": pack_id,
                         "expected_revision": latest_revision,
-                        "title":"resolved-after-reread"
+                        "document":{
+                            "name":"conflict-e2e",
+                            "title":"resolved-after-reread",
+                            "ttl_minutes":120,
+                            "status":"draft",
+                            "sections":[
+                                {"key":"sec","title":"Section updated"}
+                            ]
+                        }
                     }
                 }
             }))
@@ -1037,9 +1023,28 @@ async fn e2e_finalize_validation_reports_missing_sections_and_invalid_refs() -> 
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"create",
-                        "name":"finalize-validation-e2e",
-                        "ttl_minutes": 30
+                        "action":"write",
+                        "document":{
+                            "name":"finalize-validation-e2e",
+                            "ttl_minutes":30,
+                            "status":"draft",
+                            "sections":[
+                                {"key":"scope","title":"Scope","description":"scope text"},
+                                {
+                                    "key":"findings",
+                                    "title":"Findings",
+                                    "description":"finding text",
+                                    "refs":[
+                                        {
+                                            "key":"ref-one",
+                                            "path":"short.rs",
+                                            "line_start":10,
+                                            "line_end":10
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
                     }
                 }
             }))
@@ -1051,68 +1056,6 @@ async fn e2e_finalize_validation_reports_missing_sections_and_invalid_refs() -> 
             .to_string();
         let mut revision = payload_pack_revision(&created_payload)?;
 
-        let scope = client
-            .call(json!({
-                "jsonrpc":"2.0",
-                "id":3,
-                "method":"tools/call",
-                "params":{
-                    "name":"input",
-                    "arguments":{
-                        "action":"write","op":"upsert_section",
-                        "id": pack_id.clone(),
-                        "expected_revision": revision,
-                        "section_key":"scope",
-                        "section_title":"Scope",
-                        "section_description":"scope text"
-                    }
-                }
-            }))
-            .await?;
-        revision = payload_pack_revision(&parse_tool_payload(&scope)?)?;
-
-        let findings = client
-            .call(json!({
-                "jsonrpc":"2.0",
-                "id":4,
-                "method":"tools/call",
-                "params":{
-                    "name":"input",
-                    "arguments":{
-                        "action":"write","op":"upsert_section",
-                        "id": pack_id.clone(),
-                        "expected_revision": revision,
-                        "section_key":"findings",
-                        "section_title":"Findings",
-                        "section_description":"finding text"
-                    }
-                }
-            }))
-            .await?;
-        revision = payload_pack_revision(&parse_tool_payload(&findings)?)?;
-
-        let stale_ref = client
-            .call(json!({
-                "jsonrpc":"2.0",
-                "id":5,
-                "method":"tools/call",
-                "params":{
-                    "name":"input",
-                    "arguments":{
-                        "action":"write","op":"upsert_ref",
-                        "id": pack_id.clone(),
-                        "expected_revision": revision,
-                        "section_key":"findings",
-                        "ref_key":"ref-one",
-                        "path":"short.rs",
-                        "line_start": 10,
-                        "line_end": 10
-                    }
-                }
-            }))
-            .await?;
-        revision = payload_pack_revision(&parse_tool_payload(&stale_ref)?)?;
-
         let missing_qa = client
             .call(json!({
                 "jsonrpc":"2.0",
@@ -1121,10 +1064,30 @@ async fn e2e_finalize_validation_reports_missing_sections_and_invalid_refs() -> 
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"set_status",
+                        "action":"write",
                         "id": pack_id.clone(),
                         "expected_revision": revision,
-                        "status":"finalized"
+                        "document":{
+                            "name":"finalize-validation-e2e",
+                            "ttl_minutes":30,
+                            "status":"finalized",
+                            "sections":[
+                                {"key":"scope","title":"Scope","description":"scope text"},
+                                {
+                                    "key":"findings",
+                                    "title":"Findings",
+                                    "description":"finding text",
+                                    "refs":[
+                                        {
+                                            "key":"ref-one",
+                                            "path":"short.rs",
+                                            "line_start":10,
+                                            "line_end":10
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
                     }
                 }
             }))
@@ -1147,12 +1110,31 @@ async fn e2e_finalize_validation_reports_missing_sections_and_invalid_refs() -> 
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"upsert_section",
+                        "action":"write",
                         "id": pack_id.clone(),
                         "expected_revision": revision,
-                        "section_key":"qa",
-                        "section_title":"QA",
-                        "section_description":"verdict: fail"
+                        "document":{
+                            "name":"finalize-validation-e2e",
+                            "ttl_minutes":30,
+                            "status":"draft",
+                            "sections":[
+                                {"key":"scope","title":"Scope","description":"scope text"},
+                                {
+                                    "key":"findings",
+                                    "title":"Findings",
+                                    "description":"finding text",
+                                    "refs":[
+                                        {
+                                            "key":"ref-one",
+                                            "path":"short.rs",
+                                            "line_start":10,
+                                            "line_end":10
+                                        }
+                                    ]
+                                },
+                                {"key":"qa","title":"QA","description":"verdict: fail"}
+                            ]
+                        }
                     }
                 }
             }))
@@ -1167,10 +1149,31 @@ async fn e2e_finalize_validation_reports_missing_sections_and_invalid_refs() -> 
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"set_status",
+                        "action":"write",
                         "id": pack_id,
                         "expected_revision": revision,
-                        "status":"finalized"
+                        "document":{
+                            "name":"finalize-validation-e2e",
+                            "ttl_minutes":30,
+                            "status":"finalized",
+                            "sections":[
+                                {"key":"scope","title":"Scope","description":"scope text"},
+                                {
+                                    "key":"findings",
+                                    "title":"Findings",
+                                    "description":"finding text",
+                                    "refs":[
+                                        {
+                                            "key":"ref-one",
+                                            "path":"short.rs",
+                                            "line_start":10,
+                                            "line_end":10
+                                        }
+                                    ]
+                                },
+                                {"key":"qa","title":"QA","description":"verdict: fail"}
+                            ]
+                        }
                     }
                 }
             }))
@@ -1192,6 +1195,143 @@ async fn e2e_finalize_validation_reports_missing_sections_and_invalid_refs() -> 
             broken_ref_payload["details"]["invalid_refs"][0]["path"],
             "short.rs"
         );
+        Ok(())
+    }
+    .await;
+
+    client.stop().await?;
+    result
+}
+
+#[tokio::test]
+async fn e2e_write_snapshot_validate_only_precheck_and_finalize_commit() -> Result<()> {
+    let dir = tempdir()?;
+    let storage_root = dir.path().join("storage");
+    let source_root = dir.path().join("source");
+    tokio::fs::create_dir_all(&storage_root).await?;
+    tokio::fs::create_dir_all(&source_root).await?;
+    tokio::fs::write(source_root.join("auth.rs"), "line1\nline2\nline3\n").await?;
+
+    let mut client = McpE2EClient::spawn(&storage_root, &source_root).await?;
+
+    let result: Result<()> = async {
+        let _ = client
+            .call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .await?;
+
+        let created = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"write",
+                        "document":{
+                            "name":"snapshot-e2e",
+                            "title":"Snapshot E2E",
+                            "ttl_minutes":30,
+                            "status":"draft",
+                            "sections":[
+                                {"key":"notes","title":"Notes","description":"draft content"}
+                            ]
+                        }
+                    }
+                }
+            }))
+            .await?;
+        let created_payload = parse_tool_payload(&created)?;
+        let pack_id = created_payload["payload"]["id"]
+            .as_str()
+            .context("missing created pack id")?
+            .to_string();
+        let revision = payload_pack_revision(&created_payload)?;
+
+        let precheck = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":3,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"write",
+                        "id": pack_id.clone(),
+                        "expected_revision": revision,
+                        "validate_only": true,
+                        "document":{
+                            "name":"snapshot-e2e",
+                            "title":"Finalize precheck",
+                            "status":"finalized",
+                            "sections":[
+                                {"key":"scope","title":"Scope","description":"scope text"},
+                                {"key":"findings","title":"Findings","description":"finding text","refs":[{"key":"ref-one","path":"auth.rs","line_start":1,"line_end":2}]}
+                            ]
+                        }
+                    }
+                }
+            }))
+            .await?;
+        assert_eq!(precheck["result"]["isError"], true);
+        let precheck_payload = parse_tool_payload(&precheck)?;
+        assert_eq!(precheck_payload["code"], "finalize_validation");
+        assert_eq!(precheck_payload["details"]["missing_sections"], json!(["qa"]));
+
+        let reread = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":4,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"get",
+                        "id": pack_id.clone()
+                    }
+                }
+            }))
+            .await?;
+        let reread_payload = parse_tool_payload(&reread)?;
+        assert_eq!(
+            payload_pack_revision(&reread_payload)?,
+            revision,
+            "validate_only precheck must not persist pack state"
+        );
+        assert_eq!(reread_payload["payload"]["status"], "draft");
+
+        let finalized = client
+            .call(json!({
+                "jsonrpc":"2.0",
+                "id":5,
+                "method":"tools/call",
+                "params":{
+                    "name":"input",
+                    "arguments":{
+                        "action":"write",
+                        "id": pack_id.clone(),
+                        "expected_revision": revision,
+                        "document":{
+                            "name":"snapshot-e2e",
+                            "title":"Finalize commit",
+                            "status":"finalized",
+                            "sections":[
+                                {"key":"scope","title":"Scope","description":"scope text"},
+                                {"key":"findings","title":"Findings","description":"finding text","refs":[{"key":"ref-one","path":"auth.rs","line_start":1,"line_end":2}]},
+                                {"key":"qa","title":"QA","description":"verdict: pass"}
+                            ]
+                        }
+                    }
+                }
+            }))
+            .await?;
+        let finalized_payload = parse_tool_payload(&finalized)?;
+        assert_eq!(finalized_payload["payload"]["status"], "finalized");
+        assert!(
+            payload_pack_revision(&finalized_payload)? > revision,
+            "persisted write should increment revision"
+        );
+
         Ok(())
     }
     .await;
@@ -1223,9 +1363,12 @@ async fn e2e_touch_ttl_requires_mode_field() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"create",
-                        "name":"ttl-mode-pack",
-                        "ttl_minutes": 30
+                        "action":"write",
+                        "document":{
+                            "name":"ttl-mode-pack",
+                            "ttl_minutes":30,
+                            "sections":[]
+                        }
                     }
                 }
             }))
@@ -1270,7 +1413,7 @@ async fn e2e_touch_ttl_requires_mode_field() -> Result<()> {
 }
 
 #[tokio::test]
-async fn e2e_create_requires_ttl_minutes() -> Result<()> {
+async fn e2e_write_requires_document() -> Result<()> {
     let dir = tempdir()?;
     let storage_root = dir.path().join("storage");
     let source_root = dir.path().join("source");
@@ -1292,8 +1435,8 @@ async fn e2e_create_requires_ttl_minutes() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"create",
-                        "name":"missing-ttl"
+                        "action":"write",
+                        "name":"missing-document"
                     }
                 }
             }))
@@ -1305,7 +1448,7 @@ async fn e2e_create_requires_ttl_minutes() -> Result<()> {
         assert_eq!(err_payload["code"], "invalid_data");
         assert_eq!(
             err_payload["details"]["required_fields"],
-            json!(["ttl_minutes"])
+            json!(["document"])
         );
         Ok(())
     }
@@ -1414,9 +1557,23 @@ async fn e2e_output_read_supports_profiles_contains_and_page_token() -> Result<(
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"create",
-                        "name":"paging-e2e-pack",
-                        "ttl_minutes": 60
+                        "action":"write",
+                        "document":{
+                            "name":"paging-e2e-pack",
+                            "ttl_minutes":60,
+                            "status":"draft",
+                            "sections":[
+                                {
+                                    "key":"flow",
+                                    "title":"Flow",
+                                    "refs":[
+                                        {"key":"ref-01","path":"flow.rs","line_start":1,"line_end":1},
+                                        {"key":"ref-02","path":"flow.rs","line_start":2,"line_end":2},
+                                        {"key":"ref-03","path":"flow.rs","line_start":3,"line_end":3}
+                                    ]
+                                }
+                            ]
+                        }
                     }
                 }
             }))
@@ -1426,51 +1583,8 @@ async fn e2e_output_read_supports_profiles_contains_and_page_token() -> Result<(
             .as_str()
             .context("missing created pack id")?
             .to_string();
-        let mut revision = payload_pack_revision(&created_payload)?;
-
-        let section = client
-            .call(json!({
-                "jsonrpc":"2.0",
-                "id":3,
-                "method":"tools/call",
-                "params":{
-                    "name":"input",
-                    "arguments":{
-                        "action":"write","op":"upsert_section",
-                        "id": pack_id.clone(),
-                        "expected_revision": revision,
-                        "section_key":"flow",
-                        "section_title":"Flow"
-                    }
-                }
-            }))
-            .await?;
-        revision = payload_pack_revision(&parse_tool_payload(&section)?)?;
-
-        for (idx, line_no) in [(1_u32, 1_u32), (2, 2), (3, 3)] {
-            let updated = client
-                .call(json!({
-                    "jsonrpc":"2.0",
-                    "id": format!("ref-{}", idx),
-                    "method":"tools/call",
-                    "params":{
-                        "name":"input",
-                        "arguments":{
-                            "action":"write","op":"upsert_ref",
-                            "id": pack_id.clone(),
-                            "expected_revision": revision,
-                            "section_key":"flow",
-                            "ref_key": format!("ref-0{}", idx),
-                            "path":"flow.rs",
-                            "line_start": line_no,
-                            "line_end": line_no
-                        }
-                    }
-                }))
-                .await?;
-            revision = payload_pack_revision(&parse_tool_payload(&updated)?)?;
-        }
-        assert!(revision >= 5);
+        let revision = payload_pack_revision(&created_payload)?;
+        assert!(revision >= 1);
 
         let page1 = client
             .call(json!({
@@ -1574,6 +1688,17 @@ async fn e2e_output_read_orchestrator_default_is_bounded_and_reviewer_is_full() 
             .call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
             .await?;
 
+        let refs = (1_u32..=15_u32)
+            .map(|idx| {
+                json!({
+                    "key": format!("ref-{idx:02}"),
+                    "path": "bounded.rs",
+                    "line_start": idx,
+                    "line_end": idx
+                })
+            })
+            .collect::<Vec<_>>();
+
         let created = client
             .call(json!({
                 "jsonrpc":"2.0",
@@ -1582,11 +1707,21 @@ async fn e2e_output_read_orchestrator_default_is_bounded_and_reviewer_is_full() 
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"create",
-                        "name":"bounded-default-pack",
-                        "title":"Bounded default pack",
-                        "brief":"Routing handoff for bounded compact output",
-                        "ttl_minutes": 60
+                        "action":"write",
+                        "document":{
+                            "name":"bounded-default-pack",
+                            "title":"Bounded default pack",
+                            "brief":"Routing handoff for bounded compact output",
+                            "ttl_minutes":60,
+                            "status":"draft",
+                            "sections":[
+                                {
+                                    "key":"routing",
+                                    "title":"Routing",
+                                    "refs":refs
+                                }
+                            ]
+                        }
                     }
                 }
             }))
@@ -1596,51 +1731,8 @@ async fn e2e_output_read_orchestrator_default_is_bounded_and_reviewer_is_full() 
             .as_str()
             .context("missing created pack id")?
             .to_string();
-        let mut revision = payload_pack_revision(&created_payload)?;
-
-        let section = client
-            .call(json!({
-                "jsonrpc":"2.0",
-                "id":3,
-                "method":"tools/call",
-                "params":{
-                    "name":"input",
-                    "arguments":{
-                        "action":"write","op":"upsert_section",
-                        "id": pack_id.clone(),
-                        "expected_revision": revision,
-                        "section_key":"routing",
-                        "section_title":"Routing"
-                    }
-                }
-            }))
-            .await?;
-        revision = payload_pack_revision(&parse_tool_payload(&section)?)?;
-
-        for idx in 1_u32..=15_u32 {
-            let updated = client
-                .call(json!({
-                    "jsonrpc":"2.0",
-                    "id": format!("bounded-ref-{}", idx),
-                    "method":"tools/call",
-                    "params":{
-                        "name":"input",
-                        "arguments":{
-                            "action":"write","op":"upsert_ref",
-                            "id": pack_id.clone(),
-                            "expected_revision": revision,
-                            "section_key":"routing",
-                            "ref_key": format!("ref-{idx:02}"),
-                            "path":"bounded.rs",
-                            "line_start": idx,
-                            "line_end": idx
-                        }
-                    }
-                }))
-                .await?;
-            revision = payload_pack_revision(&parse_tool_payload(&updated)?)?;
-        }
-        assert!(revision >= 17);
+        let revision = payload_pack_revision(&created_payload)?;
+        assert!(revision >= 1);
 
         let compact_default = client
             .call(json!({
@@ -1799,9 +1891,12 @@ async fn e2e_output_read_rejects_legacy_match_cursor_mode_fields() -> Result<()>
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"create",
-                        "name":"regex-e2e-pack",
-                        "ttl_minutes": 60
+                        "action":"write",
+                        "document":{
+                            "name":"regex-e2e-pack",
+                            "ttl_minutes":60,
+                            "sections":[]
+                        }
                     }
                 }
             }))
@@ -1961,9 +2056,12 @@ async fn e2e_output_rejects_format_parameter() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"create",
-                        "name":"format-pack",
-                        "ttl_minutes": 30
+                        "action":"write",
+                        "document":{
+                            "name":"format-pack",
+                            "ttl_minutes":30,
+                            "sections":[]
+                        }
                     }
                 }
             }))
@@ -2031,9 +2129,12 @@ async fn e2e_shutdown_notification_has_no_side_effects() -> Result<()> {
             "params":{
                 "name":"input",
                 "arguments":{
-                    "action":"write","op":"create",
-                    "name":"should-not-exist",
-                    "ttl_minutes": 30
+                    "action":"write",
+                    "document":{
+                        "name":"should-not-exist",
+                        "ttl_minutes":30,
+                        "sections":[]
+                    }
                 }
             }
         }))
@@ -2105,9 +2206,12 @@ async fn e2e_concurrent_create_same_name_rejects_one_process() -> Result<()> {
         "params":{
             "name":"input",
             "arguments":{
-                "action":"write","op":"create",
-                "name":"same-name",
-                "ttl_minutes": 30
+                "action":"write",
+                "document":{
+                    "name":"same-name",
+                    "ttl_minutes":30,
+                    "sections":[]
+                }
             }
         }
     });
@@ -2308,7 +2412,7 @@ async fn e2e_server_exits_if_initialize_never_arrives() -> Result<()> {
 }
 
 #[tokio::test]
-async fn e2e_input_rejects_legacy_alias_fields() -> Result<()> {
+async fn e2e_input_write_rejects_legacy_fields() -> Result<()> {
     let dir = tempdir()?;
     let storage_root = dir.path().join("storage");
     let source_root = dir.path().join("source");
@@ -2322,7 +2426,7 @@ async fn e2e_input_rejects_legacy_alias_fields() -> Result<()> {
             .call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
             .await?;
 
-        let created = client
+        let response = client
             .call(json!({
                 "jsonrpc":"2.0",
                 "id":2,
@@ -2330,33 +2434,12 @@ async fn e2e_input_rejects_legacy_alias_fields() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"create",
-                        "name":"legacy-alias-pack",
-                        "ttl_minutes": 30
-                    }
-                }
-            }))
-            .await?;
-        let created_payload = parse_tool_payload(&created)?;
-        let pack_id = created_payload["payload"]["id"]
-            .as_str()
-            .context("missing created pack id")?
-            .to_string();
-        let revision = payload_pack_revision(&created_payload)?;
-
-        let response = client
-            .call(json!({
-                "jsonrpc":"2.0",
-                "id":3,
-                "method":"tools/call",
-                "params":{
-                    "name":"input",
-                    "arguments":{
-                        "action":"write","op":"upsert_section",
-                        "id": pack_id,
-                        "expected_revision": revision,
-                        "section_key":"flow",
-                        "title":"Legacy alias"
+                        "action":"write",
+                        "snapshot":{
+                            "name":"legacy-alias-pack",
+                            "ttl_minutes":30,
+                            "sections":[]
+                        }
                     }
                 }
             }))
@@ -2366,10 +2449,8 @@ async fn e2e_input_rejects_legacy_alias_fields() -> Result<()> {
         let err_payload = parse_tool_payload(&response)?;
         assert_eq!(err_payload["kind"], "validation");
         assert_eq!(err_payload["code"], "invalid_data");
-        assert!(err_payload["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("'title' is not supported"));
+        assert_eq!(err_payload["details"]["unsupported_field"], "snapshot");
+        assert_eq!(err_payload["details"]["supported_field"], "document");
         Ok(())
     }
     .await;
@@ -2585,9 +2666,12 @@ async fn e2e_freshness_metadata_filters_and_warnings() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"create",
-                        "name":name,
-                        "ttl_minutes":120
+                        "action":"write",
+                        "document":{
+                            "name":name,
+                            "ttl_minutes":120,
+                            "sections":[]
+                        }
                     }
                 }
             })
@@ -2817,11 +2901,17 @@ async fn e2e_multi_agent_handoff_compact_full_and_stale_path() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"create",
-                        "name":"multi-agent-handoff-pack",
-                        "title":"Multi-agent handoff",
-                        "brief":"Explorer to orchestrator/reviewer",
-                        "ttl_minutes":120
+                        "action":"write",
+                        "document":{
+                            "name":"multi-agent-handoff-pack",
+                            "title":"Multi-agent handoff",
+                            "brief":"Explorer to orchestrator/reviewer",
+                            "ttl_minutes":120,
+                            "status":"draft",
+                            "sections":[
+                                {"key":"notes","title":"Notes","description":"bootstrap"}
+                            ]
+                        }
                     }
                 }
             }))
@@ -2831,89 +2921,7 @@ async fn e2e_multi_agent_handoff_compact_full_and_stale_path() -> Result<()> {
             .as_str()
             .context("missing primary pack id")?
             .to_string();
-        let mut revision = payload_pack_revision(&created_payload)?;
-
-        let scope = client
-            .call(json!({
-                "jsonrpc":"2.0",
-                "id":"scope",
-                "method":"tools/call",
-                "params":{
-                    "name":"input",
-                    "arguments":{
-                        "action":"write","op":"upsert_section",
-                        "id":pack_id.clone(),
-                        "expected_revision":revision,
-                        "section_key":"scope",
-                        "section_title":"Scope",
-                        "section_description":"explorer coverage"
-                    }
-                }
-            }))
-            .await?;
-        revision = payload_pack_revision(&parse_tool_payload(&scope)?)?;
-
-        let findings = client
-            .call(json!({
-                "jsonrpc":"2.0",
-                "id":"findings",
-                "method":"tools/call",
-                "params":{
-                    "name":"input",
-                    "arguments":{
-                        "action":"write","op":"upsert_section",
-                        "id":pack_id.clone(),
-                        "expected_revision":revision,
-                        "section_key":"findings",
-                        "section_title":"Findings",
-                        "section_description":"auth evidence"
-                    }
-                }
-            }))
-            .await?;
-        revision = payload_pack_revision(&parse_tool_payload(&findings)?)?;
-
-        let finding_ref = client
-            .call(json!({
-                "jsonrpc":"2.0",
-                "id":"finding-ref",
-                "method":"tools/call",
-                "params":{
-                    "name":"input",
-                    "arguments":{
-                        "action":"write","op":"upsert_ref",
-                        "id":pack_id.clone(),
-                        "expected_revision":revision,
-                        "section_key":"findings",
-                        "ref_key":"auth-ref",
-                        "path":"handoff.rs",
-                        "line_start":1,
-                        "line_end":4
-                    }
-                }
-            }))
-            .await?;
-        revision = payload_pack_revision(&parse_tool_payload(&finding_ref)?)?;
-
-        let qa = client
-            .call(json!({
-                "jsonrpc":"2.0",
-                "id":"qa",
-                "method":"tools/call",
-                "params":{
-                    "name":"input",
-                    "arguments":{
-                        "action":"write","op":"upsert_section",
-                        "id":pack_id.clone(),
-                        "expected_revision":revision,
-                        "section_key":"qa",
-                        "section_title":"QA",
-                        "section_description":"verdict: pass"
-                    }
-                }
-            }))
-            .await?;
-        revision = payload_pack_revision(&parse_tool_payload(&qa)?)?;
+        let revision = payload_pack_revision(&created_payload)?;
 
         let finalized = client
             .call(json!({
@@ -2923,10 +2931,28 @@ async fn e2e_multi_agent_handoff_compact_full_and_stale_path() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"set_status",
+                        "action":"write",
                         "id":pack_id.clone(),
                         "expected_revision":revision,
-                        "status":"finalized"
+                        "document":{
+                            "name":"multi-agent-handoff-pack",
+                            "title":"Multi-agent handoff",
+                            "brief":"Explorer to orchestrator/reviewer",
+                            "ttl_minutes":120,
+                            "status":"finalized",
+                            "sections":[
+                                {"key":"scope","title":"Scope","description":"explorer coverage"},
+                                {
+                                    "key":"findings",
+                                    "title":"Findings",
+                                    "description":"auth evidence",
+                                    "refs":[
+                                        {"key":"auth-ref","path":"handoff.rs","line_start":1,"line_end":4}
+                                    ]
+                                },
+                                {"key":"qa","title":"QA","description":"verdict: pass"}
+                            ]
+                        }
                     }
                 }
             }))
@@ -2990,9 +3016,12 @@ async fn e2e_multi_agent_handoff_compact_full_and_stale_path() -> Result<()> {
                 "params":{
                     "name":"input",
                     "arguments":{
-                        "action":"write","op":"create",
-                        "name":"multi-agent-stale-pack",
-                        "ttl_minutes":120
+                        "action":"write",
+                        "document":{
+                            "name":"multi-agent-stale-pack",
+                            "ttl_minutes":120,
+                            "sections":[]
+                        }
                     }
                 }
             }))

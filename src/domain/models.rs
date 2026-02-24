@@ -209,6 +209,10 @@ impl Pack {
         Ok(())
     }
 
+    pub fn ttl_deadline_from_now(minutes: u64, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
+        Ok(now + ttl_duration(minutes)?)
+    }
+
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         self.expires_at <= now
     }

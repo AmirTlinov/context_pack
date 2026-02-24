@@ -10,12 +10,13 @@ use crate::{
             revision_conflict_guidance, DomainError, FinalizeRefIssue, Result,
             REVISION_CONFLICT_CHANGED_KEYS_LIMIT,
         },
-        models::{Pack, RefSpec},
+        models::{CodeRef, Diagram, Pack, RefSpec, Section},
         types::{
             DiagramKey, LineRange, PackId, PackName, RefKey, RelativePath, SectionKey, Status,
         },
     },
 };
+use std::collections::HashSet;
 
 pub struct InputUseCases {
     repo: Arc<dyn PackRepositoryPort>,
@@ -36,6 +37,48 @@ pub struct UpsertRefRequest {
 pub struct UpsertDiagramRequest {
     pub section_key: String,
     pub diagram_key: String,
+    pub title: String,
+    pub mermaid: String,
+    pub why: Option<String>,
+}
+
+pub struct WriteSnapshotRequest {
+    pub identifier: Option<String>,
+    pub expected_revision: Option<u64>,
+    pub validate_only: bool,
+    pub document: SnapshotDocument,
+}
+
+pub struct SnapshotDocument {
+    pub name: Option<String>,
+    pub title: Option<String>,
+    pub brief: Option<String>,
+    pub tags: Vec<String>,
+    pub ttl_minutes: Option<u64>,
+    pub status: Status,
+    pub sections: Vec<SnapshotSection>,
+}
+
+pub struct SnapshotSection {
+    pub key: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub refs: Vec<SnapshotRef>,
+    pub diagrams: Vec<SnapshotDiagram>,
+}
+
+pub struct SnapshotRef {
+    pub key: String,
+    pub path: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub title: Option<String>,
+    pub why: Option<String>,
+    pub group: Option<String>,
+}
+
+pub struct SnapshotDiagram {
+    pub key: String,
     pub title: String,
     pub mermaid: String,
     pub why: Option<String>,
@@ -129,6 +172,126 @@ impl InputUseCases {
         })
     }
 
+    async fn validate_finalize_state_if_needed(&self, pack: &Pack) -> Result<()> {
+        if pack.status == Status::Finalized {
+            pack.validate_finalize_gate()?;
+            self.validate_refs_resolvable_before_finalize(pack).await?;
+        }
+        Ok(())
+    }
+
+    fn snapshot_sections(snapshot: &[SnapshotSection]) -> Result<Vec<Section>> {
+        let mut sections = Vec::with_capacity(snapshot.len());
+        let mut seen_sections = HashSet::new();
+
+        for section in snapshot {
+            let key = SectionKey::new(&section.key)?;
+            let section_key = key.as_str().to_string();
+            if !seen_sections.insert(section_key.clone()) {
+                return Err(DomainError::InvalidData(format!(
+                    "duplicate section_key '{}' in snapshot",
+                    section_key
+                )));
+            }
+
+            let mut refs = Vec::with_capacity(section.refs.len());
+            let mut seen_refs = HashSet::new();
+            for code_ref in &section.refs {
+                let ref_key = RefKey::new(&code_ref.key)?;
+                let ref_key_str = ref_key.as_str().to_string();
+                if !seen_refs.insert(ref_key_str.clone()) {
+                    return Err(DomainError::InvalidData(format!(
+                        "duplicate ref_key '{}' in section '{}'",
+                        ref_key_str, section_key
+                    )));
+                }
+                refs.push(CodeRef {
+                    key: ref_key,
+                    path: RelativePath::new(&code_ref.path)?,
+                    lines: LineRange::new(code_ref.line_start, code_ref.line_end)?,
+                    title: code_ref.title.clone(),
+                    why: code_ref.why.clone(),
+                    group: code_ref.group.clone(),
+                });
+            }
+
+            let mut diagrams = Vec::with_capacity(section.diagrams.len());
+            let mut seen_diagrams = HashSet::new();
+            for diagram in &section.diagrams {
+                let diagram_key = DiagramKey::new(&diagram.key)?;
+                let diagram_key_str = diagram_key.as_str().to_string();
+                if !seen_diagrams.insert(diagram_key_str.clone()) {
+                    return Err(DomainError::InvalidData(format!(
+                        "duplicate diagram_key '{}' in section '{}'",
+                        diagram_key_str, section_key
+                    )));
+                }
+                diagrams.push(Diagram {
+                    key: diagram_key,
+                    title: diagram.title.clone(),
+                    mermaid: diagram.mermaid.clone(),
+                    why: diagram.why.clone(),
+                });
+            }
+
+            sections.push(Section {
+                key,
+                title: section.title.clone(),
+                description: section.description.clone(),
+                refs,
+                diagrams,
+            });
+        }
+
+        Ok(sections)
+    }
+
+    fn build_create_snapshot(snapshot: SnapshotDocument) -> Result<Pack> {
+        let pack_name = snapshot.name.as_deref().map(PackName::new).transpose()?;
+        let mut pack = Pack::new(PackId::new(), pack_name);
+        if let Some(ttl_minutes) = snapshot.ttl_minutes {
+            pack.set_ttl_on_create(ttl_minutes, pack.created_at)?;
+        }
+        pack.title = snapshot.title;
+        pack.brief = snapshot.brief;
+        pack.tags = snapshot.tags;
+        pack.status = snapshot.status;
+        pack.sections = Self::snapshot_sections(&snapshot.sections)?;
+        Ok(pack)
+    }
+
+    fn build_update_snapshot(current: &Pack, snapshot: SnapshotDocument) -> Result<Pack> {
+        if let Some(snapshot_name) = snapshot.name {
+            let parsed = PackName::new(&snapshot_name)?;
+            if current.name.as_ref() != Some(&parsed) {
+                return Err(DomainError::InvalidData(
+                    "name is immutable for existing packs".into(),
+                ));
+            }
+        }
+
+        let now = chrono::Utc::now();
+        let mut pack = Pack {
+            schema_version: current.schema_version,
+            id: current.id.clone(),
+            name: current.name.clone(),
+            title: snapshot.title,
+            brief: snapshot.brief,
+            status: snapshot.status,
+            tags: snapshot.tags,
+            sections: Self::snapshot_sections(&snapshot.sections)?,
+            revision: current.revision.saturating_add(1),
+            created_at: current.created_at,
+            updated_at: now,
+            expires_at: current.expires_at,
+        };
+
+        if let Some(ttl_minutes) = snapshot.ttl_minutes {
+            pack.expires_at = Pack::ttl_deadline_from_now(ttl_minutes, now)?;
+        }
+        Ok(pack)
+    }
+
     // ── queries ───────────────────────────────────────────────────────────────
 
     pub async fn list(
@@ -204,6 +367,51 @@ impl InputUseCases {
         Err(DomainError::Conflict(
             "failed to allocate unique pack id".into(),
         ))
+    }
+
+    pub async fn write_snapshot(&self, request: WriteSnapshotRequest) -> Result<Pack> {
+        match request.identifier {
+            Some(identifier) => {
+                let expected_revision = request.expected_revision.ok_or_else(|| {
+                    DomainError::InvalidData(
+                        "expected_revision is required when updating by identifier".into(),
+                    )
+                })?;
+                let current = self.resolve(&identifier).await?;
+                if current.revision != expected_revision {
+                    return Err(DomainError::RevisionConflictDetailed {
+                        expected_revision,
+                        current_revision: current.revision,
+                        last_updated_at: current.updated_at.to_rfc3339(),
+                        changed_section_keys: conflict_changed_section_keys(&current),
+                        guidance: revision_conflict_guidance(current.revision),
+                    });
+                }
+
+                let pack = Self::build_update_snapshot(&current, request.document)?;
+                self.validate_finalize_state_if_needed(&pack).await?;
+                if !request.validate_only {
+                    self.repo
+                        .save_with_expected_revision(&pack, expected_revision)
+                        .await?;
+                }
+                Ok(pack)
+            }
+            None => {
+                if request.expected_revision.is_some() {
+                    return Err(DomainError::InvalidData(
+                        "expected_revision is only valid when identifier is set".into(),
+                    ));
+                }
+
+                let pack = Self::build_create_snapshot(request.document)?;
+                self.validate_finalize_state_if_needed(&pack).await?;
+                if !request.validate_only {
+                    self.repo.create_new(&pack).await?;
+                }
+                Ok(pack)
+            }
+        }
     }
 
     pub async fn set_status_checked(
