@@ -6,7 +6,7 @@ use std::{collections::HashMap, sync::Arc, sync::Mutex};
 
 use mcp_context_pack::{
     app::{
-        output_usecases::OutputUseCases,
+        output_usecases::{OutputProfile, OutputReadRequest, OutputUseCases},
         ports::{CodeExcerptPort, ListFilter, PackRepositoryPort, Snippet},
     },
     domain::{
@@ -133,7 +133,16 @@ async fn test_render_legend_contains_id_and_status() {
     let pack = simple_pack();
     let id_str = pack.id.as_str().to_string();
     let uc = make_output(vec![pack], FakeExcerptPort::stale());
-    let rendered = uc.get_rendered(&id_str, None).await.unwrap();
+    let rendered = uc
+        .get_rendered_with_request(
+            &id_str,
+            OutputReadRequest {
+                profile: Some(OutputProfile::Reviewer),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     assert!(rendered.contains("[LEGEND]"), "missing [LEGEND]");
     assert!(rendered.contains(&id_str), "id missing from legend");
     assert!(rendered.contains("draft"), "status missing from legend");
@@ -146,7 +155,16 @@ async fn test_render_with_name_and_brief() {
     pack.brief = Some("brief description".to_string());
     let id_str = pack.id.as_str().to_string();
     let uc = make_output(vec![pack], FakeExcerptPort::stale());
-    let rendered = uc.get_rendered(&id_str, None).await.unwrap();
+    let rendered = uc
+        .get_rendered_with_request(
+            &id_str,
+            OutputReadRequest {
+                profile: Some(OutputProfile::Reviewer),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     assert!(rendered.contains("my-feature"), "name missing");
     assert!(rendered.contains("brief description"), "brief missing");
 }
@@ -158,7 +176,16 @@ async fn test_render_with_tags() {
     pack.tags = vec!["rust".to_string(), "backend".to_string()];
     let id_str = pack.id.as_str().to_string();
     let uc = make_output(vec![pack], FakeExcerptPort::stale());
-    let rendered = uc.get_rendered(&id_str, None).await.unwrap();
+    let rendered = uc
+        .get_rendered_with_request(
+            &id_str,
+            OutputReadRequest {
+                profile: Some(OutputProfile::Reviewer),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     assert!(rendered.contains("rust"), "tag 'rust' missing");
     assert!(rendered.contains("backend"), "tag 'backend' missing");
 }
@@ -197,7 +224,16 @@ async fn test_render_with_section_and_ref() {
         vec![pack],
         FakeExcerptPort::with(vec![("src/lib.rs", "   1: fn main() {}")]),
     );
-    let rendered = uc.get_rendered(&id_str, None).await.unwrap();
+    let rendered = uc
+        .get_rendered_with_request(
+            &id_str,
+            OutputReadRequest {
+                profile: Some(OutputProfile::Reviewer),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     assert!(rendered.contains("[CONTENT]"), "missing [CONTENT]");
     assert!(rendered.contains("Main Section"), "section title missing");
     assert!(rendered.contains("fn main()"), "code excerpt missing");
@@ -229,7 +265,16 @@ async fn test_render_stale_ref_shown_as_warning() {
     let id_str = pack.id.as_str().to_string();
     // FakeExcerptPort::stale() returns StaleRef for every path
     let uc = make_output(vec![pack], FakeExcerptPort::stale());
-    let rendered = uc.get_rendered(&id_str, None).await.unwrap();
+    let rendered = uc
+        .get_rendered_with_request(
+            &id_str,
+            OutputReadRequest {
+                profile: Some(OutputProfile::Reviewer),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     assert!(
         rendered.contains("> stale ref:"),
         "expected stale ref warning, got:\n{rendered}"
@@ -259,7 +304,16 @@ async fn test_render_with_diagram_block() {
 
     let id_str = pack.id.as_str().to_string();
     let uc = make_output(vec![pack], FakeExcerptPort::stale());
-    let rendered = uc.get_rendered(&id_str, None).await.unwrap();
+    let rendered = uc
+        .get_rendered_with_request(
+            &id_str,
+            OutputReadRequest {
+                profile: Some(OutputProfile::Reviewer),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     assert!(
         rendered.contains("```mermaid"),
         "expected mermaid block, got:\n{rendered}"
@@ -350,7 +404,16 @@ async fn test_lang_detection_rust_extension() {
         vec![pack],
         FakeExcerptPort::with(vec![("src/main.rs", "   1: fn main() {}")]),
     );
-    let rendered = uc.get_rendered(&id_str, None).await.unwrap();
+    let rendered = uc
+        .get_rendered_with_request(
+            &id_str,
+            OutputReadRequest {
+                profile: Some(OutputProfile::Reviewer),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     assert!(
         rendered.contains("```rust"),
         "expected ```rust language tag, got:\n{rendered}"
@@ -383,7 +446,16 @@ async fn test_lang_detection_unknown_extension() {
         vec![pack],
         FakeExcerptPort::with(vec![("data/file.xyz", "   1: some data")]),
     );
-    let rendered = uc.get_rendered(&id_str, None).await.unwrap();
+    let rendered = uc
+        .get_rendered_with_request(
+            &id_str,
+            OutputReadRequest {
+                profile: Some(OutputProfile::Reviewer),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     // Should contain ``` but NOT ```rust or any other lang tag
     assert!(rendered.contains("```\n"), "expected empty lang tag ```\\n");
     assert!(

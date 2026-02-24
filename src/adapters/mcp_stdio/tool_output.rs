@@ -1,15 +1,13 @@
 use serde_json::Value;
 use std::collections::HashSet;
 
-use crate::app::output_usecases::{OutputGetRequest, OutputMode, OutputUseCases};
+use crate::app::output_usecases::{OutputProfile, OutputReadRequest, OutputUseCases};
 use crate::app::ports::FreshnessState;
 use crate::domain::errors::DomainError;
 use crate::domain::models::Pack;
 use crate::domain::types::PackId;
 
 use super::{freshness_opt, req_identifier, status_opt, str_opt, tool_text_success, usize_opt};
-
-const DEFAULT_COMPACT_LIMIT: usize = 6;
 
 pub(super) async fn handle_output_tool(
     args: &Value,
@@ -86,11 +84,11 @@ fn format_pack_list_markdown(packs: &[Pack]) -> String {
     out
 }
 
-fn output_mode_opt(args: &Value) -> Result<Option<OutputMode>, DomainError> {
-    let Some(raw) = args.get("mode").and_then(|v| v.as_str()) else {
+fn output_profile_opt(args: &Value) -> Result<Option<OutputProfile>, DomainError> {
+    let Some(raw) = args.get("profile").and_then(|v| v.as_str()) else {
         return Ok(None);
     };
-    Ok(Some(raw.parse::<OutputMode>()?))
+    Ok(Some(raw.parse::<OutputProfile>()?))
 }
 
 fn unsupported_output_action(action: &str) -> DomainError {
@@ -106,41 +104,43 @@ fn unsupported_output_action(action: &str) -> DomainError {
     }
 }
 
-fn build_output_get_request(args: &Value) -> Result<OutputGetRequest, DomainError> {
+fn build_output_get_request(args: &Value) -> Result<OutputReadRequest, DomainError> {
     let status_filter = status_opt(args, "status")?;
-    let explicit_mode = output_mode_opt(args)?;
+    let profile = output_profile_opt(args)?;
     let limit = usize_opt(args, "limit")?;
     let offset = usize_opt(args, "offset")?;
-    let cursor = str_opt(args, "cursor");
-    let match_regex = str_opt(args, "match");
+    reject_legacy_read_fields(args)?;
+    let page_token = str_opt(args, "page_token");
+    let contains = str_opt(args, "contains");
 
-    let (mode, limit) = apply_default_compact_handoff_mode(explicit_mode, limit, cursor.as_deref());
-
-    Ok(OutputGetRequest {
+    Ok(OutputReadRequest {
         status_filter,
-        mode,
+        profile,
         limit,
         offset,
-        cursor,
-        match_regex,
+        page_token,
+        contains,
     })
 }
 
-fn apply_default_compact_handoff_mode(
-    explicit_mode: Option<OutputMode>,
-    limit: Option<usize>,
-    cursor: Option<&str>,
-) -> (Option<OutputMode>, Option<usize>) {
-    if explicit_mode.is_some() {
-        return (explicit_mode, limit);
+fn reject_legacy_read_fields(args: &Value) -> Result<(), DomainError> {
+    if args.get("mode").is_some() {
+        return Err(DomainError::InvalidData(
+            "'mode' is not supported in v3 read; use 'profile' (orchestrator|reviewer|executor)"
+                .into(),
+        ));
     }
-
-    if cursor.is_some() {
-        return (None, limit);
+    if args.get("cursor").is_some() {
+        return Err(DomainError::InvalidData(
+            "'cursor' is not supported; use 'page_token'".into(),
+        ));
     }
-
-    let compact_limit = Some(limit.unwrap_or(DEFAULT_COMPACT_LIMIT));
-    (Some(OutputMode::Compact), compact_limit)
+    if args.get("match").is_some() {
+        return Err(DomainError::InvalidData(
+            "'match' is not supported; use 'contains' substring filter".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn append_selection_metadata(identifier: &str, markdown: String) -> String {
@@ -262,11 +262,11 @@ fn legend_value(markdown: &str, key: &str) -> Option<String> {
 mod tests {
     use serde_json::json;
 
-    use crate::app::output_usecases::OutputMode;
+    use crate::app::output_usecases::OutputProfile;
 
     use super::{
-        append_selection_metadata, apply_default_compact_handoff_mode, build_output_get_request,
-        legend_lines, legend_value, DEFAULT_COMPACT_LIMIT,
+        append_selection_metadata, build_output_get_request, legend_lines, legend_value,
+        reject_legacy_read_fields,
     };
 
     #[test]
@@ -345,50 +345,48 @@ noop
     }
 
     #[test]
-    fn default_output_get_uses_compact_handoff_with_bounded_limit() {
+    fn default_output_read_uses_orchestrator_profile() {
         let request = build_output_get_request(&json!({ "id": "pk_aaaaaaaa" }))
             .expect("default request must parse");
-        assert_eq!(request.mode, Some(OutputMode::Compact));
-        assert_eq!(request.limit, Some(DEFAULT_COMPACT_LIMIT));
-    }
-
-    #[test]
-    fn explicit_full_mode_keeps_unbounded_behavior() {
-        let request = build_output_get_request(&json!({
-            "id": "pk_aaaaaaaa",
-            "mode": "full"
-        }))
-        .expect("explicit mode request must parse");
-        assert_eq!(request.mode, Some(OutputMode::Full));
+        assert_eq!(request.profile, None);
         assert_eq!(request.limit, None);
     }
 
     #[test]
-    fn cursor_without_explicit_mode_keeps_cursor_mode_contract() {
+    fn explicit_profile_is_parsed() {
         let request = build_output_get_request(&json!({
             "id": "pk_aaaaaaaa",
-            "cursor": "v1:deadbeef"
+            "profile": "reviewer"
         }))
-        .expect("cursor request must parse");
-        assert_eq!(request.mode, None);
+        .expect("explicit profile request must parse");
+        assert_eq!(request.profile, Some(OutputProfile::Reviewer));
         assert_eq!(request.limit, None);
     }
 
     #[test]
-    fn helper_applies_default_limit_only_when_needed() {
-        let (defaulted_mode, defaulted_limit) =
-            apply_default_compact_handoff_mode(None, None, None);
-        assert_eq!(defaulted_mode, Some(OutputMode::Compact));
-        assert_eq!(defaulted_limit, Some(DEFAULT_COMPACT_LIMIT));
+    fn page_token_is_forwarded_without_profile_override() {
+        let request = build_output_get_request(&json!({
+            "id": "pk_aaaaaaaa",
+            "page_token": "v1:deadbeef"
+        }))
+        .expect("page_token request must parse");
+        assert_eq!(request.profile, None);
+        assert_eq!(request.limit, None);
+        assert_eq!(request.page_token.as_deref(), Some("v1:deadbeef"));
+    }
 
-        let (explicit_limit_mode, explicit_limit) =
-            apply_default_compact_handoff_mode(None, Some(7), None);
-        assert_eq!(explicit_limit_mode, Some(OutputMode::Compact));
-        assert_eq!(explicit_limit, Some(7));
+    #[test]
+    fn legacy_read_fields_are_rejected() {
+        let mode = reject_legacy_read_fields(&json!({"mode":"full"}))
+            .expect_err("mode should be rejected");
+        assert!(mode.to_string().contains("'mode' is not supported"));
 
-        let (cursor_mode, cursor_limit) =
-            apply_default_compact_handoff_mode(None, None, Some("v1:x"));
-        assert_eq!(cursor_mode, None);
-        assert_eq!(cursor_limit, None);
+        let cursor = reject_legacy_read_fields(&json!({"cursor":"v1:x"}))
+            .expect_err("cursor should be rejected");
+        assert!(cursor.to_string().contains("'cursor' is not supported"));
+
+        let r#match = reject_legacy_read_fields(&json!({"match":"foo"}))
+            .expect_err("match should be rejected");
+        assert!(r#match.to_string().contains("'match' is not supported"));
     }
 }
