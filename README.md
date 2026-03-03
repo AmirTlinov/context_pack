@@ -182,7 +182,7 @@ For the full tool contract, paging, profiles, error codes, and migration notes �
 - `not_found` — pack has likely expired by TTL.
 - `tool output too large` — split the pack into smaller sections.
 - `ambiguous` — name matched multiple packs; use exact `id` from `details.candidate_ids`.
-- Corrupted or oversized pack files are removed automatically during list operations. To remove a specific pack: `input { "action": "delete_pack", "id": "<pack_id>" }`.
+- Corrupted or oversized pack files are removed automatically during list operations. To remove a specific pack: `input { "action": "delete", "id": "<pack_id>" }`.
 
 ---
 
@@ -417,7 +417,7 @@ Compact handoff-чтение (по умолчанию — bounded, профил�
 - `not_found` — пакет, скорее всего, истёк по TTL.
 - `tool output too large` — разбейте пакет на более мелкие секции.
 - `ambiguous` — имя совпало с несколькими пакетами; используйте точный `id` из `details.candidate_ids`.
-- Повреждённые или oversized-файлы пакетов удаляются автоматически при операциях list. Для точечного удаления: `input { "action": "delete_pack", "id": "<pack_id>" }`.
+- Повреждённые или oversized-файлы пакетов удаляются автоматически при операциях list. Для точечного удаления: `input { "action": "delete", "id": "<pack_id>" }`.
 
 ---
 

@@ -1,22 +1,7 @@
-# role-modes.md — режимы ролей
+# LEGACY notice: role-modes.md
 
-### Explorer (быстрый)
-- Узкий scope, минимум шагов.
-- Обычно 3–10 anchors.
+Ролевые режимы для context_pack v3 поддерживаются в:
 
-### Deep Explorer (глубокий)
-- Широкое покрытие + edge‑cases.
-- Обычно 10+ anchors, при необходимости диаграммы.
-- Обязателен блок risks/gaps/next checks.
+- `../../../.codex/skills/context-pack-repo-profile/references/10-daily-workflows.md`
 
-### Reviewer
-- Только узкий валидный scope; иначе `BLOCKED`.
-- Findings обязаны иметь REF + evidence + fix + validation.
-
-## Batch‑ритм (скорость без потери качества)
-
-Разрешено собирать несколько якорей за цикл:
-1) `get revision`
-2) серия `upsert_ref`
-3) промежуточный `output get`
-4) следующая серия
+Причина deprecation: legacy-mode ссылался на v2 действия (`upsert_*`, `output get`).

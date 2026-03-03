@@ -1,6 +1,10 @@
-# troubleshooting.md — частые проблемы
+# LEGACY notice: troubleshooting.md
 
-- `revision_conflict` → перечитать pack (`get`), обновить `expected_revision`.
-- `stale_ref` → поправить `path/lines` или удалить ref.
-- `not_found` → pack мог истечь по TTL.
-- `tool output too large` → разбить пакет на меньшие секции (output ограничен по размеру).
+Для актуальной диагностики v3 используй:
+
+- recovery playbook:
+  - `../../../.codex/skills/context-pack-repo-profile/references/30-recovery-playbook.md`
+- finalize + freshness discipline:
+  - `../../../.codex/skills/context-pack-repo-profile/references/20-finalize-qa-freshness.md`
+
+Legacy troubleshooting-советы не считаются нормативом для этого репозитория.

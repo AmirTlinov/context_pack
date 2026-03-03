@@ -1,25 +1,12 @@
-# examples.md — каркасы секций
+# LEGACY notice: examples.md
 
-## A) Bug/incident investigation
-- `scope`
-- `symptoms`
-- `root-cause-hypotheses`
-- `evidence`
-- `fix-options`
-- `verification`
+Примеры из legacy skill-пака не являются каноничными для v3.
 
-## B) Code/PR review
-- `scope_confirmed`
-- `scorecard`
-- `findings`
-- `risks`
-- `reprioritization`
-- `final_verdict`
+Используй вместо этого:
 
-## C) Feature discovery / implementation prep
-- `current_state`
-- `target_behavior`
-- `constraints/contracts`
-- `touch_points`
-- `migration_plan`
-- `acceptance_checks`
+- section templates:
+  - `../../../.codex/skills/context-pack-repo-profile/references/40-section-templates.md`
+- daily workflows:
+  - `../../../.codex/skills/context-pack-repo-profile/references/10-daily-workflows.md`
+- v3 contract examples:
+  - `../../../.codex/skills/context-pack-repo-profile/references/00-v3-contract-cheatsheet.md`
