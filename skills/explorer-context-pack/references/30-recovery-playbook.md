@@ -1,4 +1,4 @@
-# Recovery playbook (v3)
+# context_pack v3 — Recovery playbook
 
 Глобальный retry budget: максимум 3 повтора на один тип сбоя, затем `BLOCKED` с причиной и evidence.
 

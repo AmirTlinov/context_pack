@@ -1,4 +1,4 @@
-# Finalize / QA gate + Freshness/TTL discipline
+# context_pack v3 — Finalize / QA gate + Freshness/TTL discipline
 
 ## 1) Finalize gate (fail-closed)
 

@@ -1,4 +1,4 @@
-# Naming conventions (`section_key`, `ref_key`, `group`)
+# context_pack v3 — Naming conventions (`section_key`, `ref_key`, `group`)
 
 Цель: стабилизировать структуру пакета и сделать фильтрацию/навигацию предсказуемой.
 
