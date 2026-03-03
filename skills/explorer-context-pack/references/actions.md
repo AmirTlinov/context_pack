@@ -1,24 +1,23 @@
-# actions.md — обязательные поля
+# LEGACY notice: actions.md
 
-| tool | action | обязательные поля |
-|---|---|---|
-| input | list | `action` |
-| input | create | `action`, `ttl_minutes` |
-| input | get | `action`, `id|name` |
-| input | upsert_section | `action`, `id|name`, `expected_revision`, `section_key`, `section_title` |
-| input | delete_section | `action`, `id|name`, `expected_revision`, `section_key` |
-| input | upsert_ref | `action`, `id|name`, `expected_revision`, `section_key`, `ref_key`, `path`, `line_start`, `line_end` |
-| input | delete_ref | `action`, `id|name`, `expected_revision`, `section_key`, `ref_key` |
-| input | upsert_diagram | `action`, `id|name`, `expected_revision`, `section_key`, `diagram_key`, `title`, `mermaid` |
-| input | set_meta | `action`, `id|name`, `expected_revision`, минимум одно: `title|brief|tags` |
-| input | set_status | `action`, `id|name`, `expected_revision`, `status` |
-| input | touch_ttl | `action`, `id|name`, `expected_revision`, ровно одно: `ttl_minutes` или `extend_minutes` |
-| output | list | `action` |
-| output | get | `action`, `id|name` |
+Этот файл больше не описывает актуальный контракт.
 
-Канонические поля (алиасы запрещены):
-- `section_title`, `section_description`
-- `ref_title`, `ref_why`
-- `diagram_why`
+Используй:
 
-`output` всегда markdown, `format` не передавать.
+- `../../../.codex/skills/context-pack-repo-profile/references/00-v3-contract-cheatsheet.md`
+- `../../../TECHNICAL.md`
+
+## v2 -> v3 map
+
+| Legacy (не использовать) | v3 replacement |
+|---|---|
+| `input create` | `input write` (create snapshot) |
+| `upsert_section` / `upsert_ref` / `upsert_diagram` | `input write` (full document snapshot) |
+| `set_meta` / `set_status` | `input write` |
+| `touch_ttl` | `input ttl` |
+| `output get` | `output read` |
+
+Актуальные action'ы v3:
+
+- `input`: `list|get|write|ttl|delete`
+- `output`: `list|read`

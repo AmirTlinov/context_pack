@@ -1,24 +1,10 @@
-# qa-dod.md — QA gate и DoD
+# LEGACY notice: qa-dod.md
 
-## QA gate перед finalize
+Этот файл заменён актуальным v3 guidance.
 
-Финализировать можно только если:
-- каждый важный вывод имеет anchor (`path:start-end`);
-- нет `stale_ref`;
-- нет противоречий между секциями;
-- output читаемый и самодостаточный.
+Используй:
 
-## Усиления для реальных проектов
+- `../../../.codex/skills/context-pack-repo-profile/references/20-finalize-qa-freshness.md`
+- `../../../TECHNICAL.md#finalize-checklist-fail-closed`
 
-- любой Critical/High вывод:
-  - минимум 2 anchors, **или**
-  - 1 anchor + независимая контрпроверка;
-- у каждого High/Critical есть `fix + validation`;
-- при неопределённости → не финализировать (`draft + gaps`).
-
-## DoD
-
-- scope покрыт;
-- ключевые выводы подтверждены anchors;
-- summary валиден;
-- pack пригоден для действий без повторного рескана кода.
+Ключевой v3 принцип: finalize только после `input.write(validate_only=true, document.status=finalized)` precheck.
