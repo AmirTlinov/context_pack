@@ -1,4 +1,4 @@
-# Section templates (v3 snapshot)
+# context_pack v3 — Section templates (snapshot)
 
 Ниже — шаблоны для `document.sections` в `input.write`.
 

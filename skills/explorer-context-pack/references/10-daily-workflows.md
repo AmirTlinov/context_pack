@@ -1,4 +1,4 @@
-# Daily workflows (repo-specific)
+# context_pack v3 — Daily workflows
 
 Цель: быстро передавать фактический контекст между ролями без повторного сканирования кода.
 

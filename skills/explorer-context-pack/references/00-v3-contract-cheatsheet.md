@@ -1,6 +1,6 @@
 # v3 Contract Cheat-Sheet (copy/paste)
 
-Источник правды: [TECHNICAL.md](../../../../TECHNICAL.md).
+Источник правды: [TECHNICAL.md](../../../TECHNICAL.md).
 
 ## Allowed actions
 

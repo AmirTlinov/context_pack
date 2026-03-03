@@ -1,4 +1,4 @@
-# Anti-patterns (не делать)
+# context_pack v3 — Anti-patterns (не делать)
 
 ## Contract violations
 
